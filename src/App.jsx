@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -52,6 +52,47 @@ const DEFAULT_CHILDREN = [
 ];
 
 const DEFAULT_ALLOCATION = { ovdp_peak: 50, btc: 50 };
+
+// ── Where To Buy ──────────────────────────────────────────────────────────────
+
+const WHERE_TO_BUY = {
+  bond_uah: {
+    title: "Де купити ОВДП",
+    items: [
+      { name: "Monobank", note: "застосунок → Інвестиції → ОВДП" },
+      { name: "Sense Bank", note: "онлайн-банкінг, від 1 000 ₴" },
+      { name: "ПриватБанк", note: "Privat24 → Інвестиції" },
+      { name: "МінФін аукціон", note: "через первинних дилерів, щовівторка" },
+    ],
+    hint: "Аукціон — кожного вівторка. Купон виплачується кожні 6 місяців.",
+  },
+  bond_eur: {
+    title: "Де купити EUR облігації",
+    items: [
+      { name: "Interactive Brokers", note: "ETF: iShares IBGL, Vanguard VGEA" },
+      { name: "DEGIRO", note: "доступний для EU резидентів" },
+      { name: "Saxo Bank", note: "прямі облігації + ETF" },
+    ],
+    hint: "ETF: iShares € Govt Bond (IBGL), Xtrackers Eurozone (DBZB).",
+  },
+  bond_usd: {
+    title: "Де купити USD облігації",
+    items: [
+      { name: "Interactive Brokers", note: "US Treasury + ETF: TLT, IEF, SHY" },
+      { name: "Tastytrade", note: "зручний для US Treasury Bills" },
+    ],
+    hint: "Short-term (SHY 1-3Y), Mid-term (IEF 7-10Y), Long-term (TLT 20Y+).",
+  },
+  crypto: {
+    title: "Де купити крипту",
+    items: [
+      { name: "Binance", note: "найбільший обʼєм, EUR/UAH пари" },
+      { name: "Kraken", note: "надійний, SEPA поповнення" },
+      { name: "Coinbase", note: "простий, regulated у EU (MiCA)" },
+    ],
+    hint: "DCA: купуй рівними частинами щомісяця незалежно від ціни.",
+  },
+};
 
 // ── Calculations ─────────────────────────────────────────────────────────────
 
@@ -135,6 +176,123 @@ function fmtEUR(n) {
   return "€" + n.toFixed(0);
 }
 
+function fmtTime(date) {
+  if (!date) return null;
+  return date.toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" });
+}
+
+// ── Live Prices Hook ──────────────────────────────────────────────────────────
+
+function useLivePrices(setMarket) {
+  const [liveStatus, setLiveStatus] = useState({ loading: false, error: null, updatedAt: null });
+
+  const refresh = useCallback(async () => {
+    setLiveStatus(s => ({ ...s, loading: true, error: null }));
+    try {
+      const [cryptoRes, fxRes] = await Promise.all([
+        fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=eur"),
+        fetch("https://api.frankfurter.app/latest?from=EUR&to=UAH,USD"),
+      ]);
+      const [crypto, fx] = await Promise.all([cryptoRes.json(), fxRes.json()]);
+      setMarket(prev => ({
+        ...prev,
+        btcPriceEUR: Math.round(crypto.bitcoin?.eur ?? prev.btcPriceEUR),
+        ethPriceEUR: Math.round(crypto.ethereum?.eur ?? prev.ethPriceEUR),
+        solPriceEUR: +((crypto.solana?.eur ?? prev.solPriceEUR).toFixed(2)),
+        usdPerEUR:   +((fx.rates?.USD ?? prev.usdPerEUR).toFixed(4)),
+        uahPerEUR:   +((fx.rates?.UAH ?? prev.uahPerEUR).toFixed(2)),
+      }));
+      setLiveStatus({ loading: false, error: null, updatedAt: new Date() });
+    } catch {
+      setLiveStatus(s => ({ ...s, loading: false, error: "Помилка оновлення" }));
+    }
+  }, [setMarket]);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  return { ...liveStatus, refresh };
+}
+
+// ── Wallet Balance Fetchers ───────────────────────────────────────────────────
+
+async function fetchBTCBalance(address) {
+  const r = await fetch(`https://blockchain.info/q/addressbalance/${address}?cors=true`);
+  const txt = await r.text();
+  const n = parseInt(txt, 10);
+  if (isNaN(n)) throw new Error("Невірна відповідь");
+  return n / 1e8;
+}
+
+async function fetchETHBalance(address) {
+  const r = await fetch(
+    `https://api.etherscan.io/api?module=account&action=balance&address=${address}&tag=latest`
+  );
+  const d = await r.json();
+  if (d.status !== "1") throw new Error(d.message || "Помилка");
+  return parseInt(d.result, 10) / 1e18;
+}
+
+async function fetchSOLBalance(address) {
+  const r = await fetch("https://api.mainnet-beta.solana.com", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(d.error.message);
+  return d.result.value / 1e9;
+}
+
+// ── Wallet Balances Hook ──────────────────────────────────────────────────────
+
+function useWalletBalances(wallets, market) {
+  const [balances, setBalances] = useState({});
+  const [loading, setLoading] = useState({});
+  const [errors, setErrors]   = useState({});
+
+  const refresh = useCallback(async () => {
+    const fetchers = {
+      btc: wallets.btc ? () => fetchBTCBalance(wallets.btc) : null,
+      eth: wallets.eth ? () => fetchETHBalance(wallets.eth) : null,
+      sol: wallets.sol ? () => fetchSOLBalance(wallets.sol) : null,
+    };
+    const keys = Object.keys(fetchers).filter(k => fetchers[k]);
+    if (!keys.length) return;
+
+    setLoading(Object.fromEntries(keys.map(k => [k, true])));
+
+    await Promise.allSettled(keys.map(async k => {
+      try {
+        const coins = await fetchers[k]();
+        setBalances(prev => ({ ...prev, [k]: coins }));
+        setErrors(prev => ({ ...prev, [k]: null }));
+      } catch (e) {
+        setErrors(prev => ({ ...prev, [k]: e.message }));
+      } finally {
+        setLoading(prev => ({ ...prev, [k]: false }));
+      }
+    }));
+  }, [wallets]);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const totalEUR = useMemo(() => (
+    (balances.btc || 0) * market.btcPriceEUR +
+    (balances.eth || 0) * market.ethPriceEUR +
+    (balances.sol || 0) * market.solPriceEUR
+  ), [balances, market]);
+
+  return { balances, loading, errors, totalEUR, refresh };
+}
+
 // ── UI Primitives ─────────────────────────────────────────────────────────────
 
 function Slider({ label, value, setValue, min, max, step, suffix, note }) {
@@ -148,7 +306,7 @@ function Slider({ label, value, setValue, min, max, step, suffix, note }) {
       <input
         type="range" min={min} max={max} step={step} value={value}
         onChange={e => setValue(Number(e.target.value))}
-        aria-label={label} aria-valuemin={min} aria-valuemax={max} aria-valuenow={value}
+        aria-label={label}
       />
       <div className="slider-range">
         <span>{min}{suffix}</span>
@@ -240,6 +398,27 @@ function ChildrenSettings({ children, setChildren }) {
   );
 }
 
+// ── Where To Buy Section ──────────────────────────────────────────────────────
+
+function WhereToBuySection({ type }) {
+  const info = WHERE_TO_BUY[type];
+  if (!info) return null;
+  return (
+    <div className="where-to-buy">
+      <div className="wtb-title">{info.title}</div>
+      <div className="wtb-list">
+        {info.items.map((item, i) => (
+          <div key={i} className="wtb-item">
+            <span className="wtb-name">{item.name}</span>
+            <span className="wtb-note">{item.note}</span>
+          </div>
+        ))}
+      </div>
+      {info.hint && <div className="wtb-hint">💡 {info.hint}</div>}
+    </div>
+  );
+}
+
 // ── Instruments Settings Tab ──────────────────────────────────────────────────
 
 function InstrumentsSettings({ instruments, setInstruments, market, setMarket }) {
@@ -248,6 +427,8 @@ function InstrumentsSettings({ instruments, setInstruments, market, setMarket })
     if (i.id !== id) return i;
     return { ...i, scenarios: i.scenarios.map((s, si) => si === idx ? { ...s, cagr } : s) };
   }));
+
+  const bondTypes = ["bond_uah", "bond_eur", "bond_usd"];
 
   return (
     <div className="settings-panel">
@@ -285,6 +466,9 @@ function InstrumentsSettings({ instruments, setInstruments, market, setMarket })
             </div>
           </div>
         ))}
+        <div className="wtb-group">
+          {bondTypes.map(t => <WhereToBuySection key={t} type={t} />)}
+        </div>
       </section>
 
       <section className="settings-section">
@@ -310,6 +494,7 @@ function InstrumentsSettings({ instruments, setInstruments, market, setMarket })
             </div>
           </div>
         ))}
+        <WhereToBuySection type="crypto" />
       </section>
     </div>
   );
@@ -540,6 +725,100 @@ function CompareTab({ scenarioA, setScenarioA, scenarioB, setScenarioB, instrume
   );
 }
 
+// ── Wallets Tab ───────────────────────────────────────────────────────────────
+
+const WALLET_CONFIGS = [
+  { key: "btc", label: "Bitcoin", emoji: "₿", color: "#f59e0b", priceKey: "btcPriceEUR",
+    placeholder: "bc1q… або 1… або 3…" },
+  { key: "eth", label: "Ethereum", emoji: "Ξ", color: "#818cf8", priceKey: "ethPriceEUR",
+    placeholder: "0x…" },
+  { key: "sol", label: "Solana",   emoji: "◎", color: "#a855f7", priceKey: "solPriceEUR",
+    placeholder: "Sol адреса (base58)…" },
+];
+
+function WalletsTab({ wallets, setWallets, market }) {
+  const { balances, loading, errors, totalEUR, refresh } = useWalletBalances(wallets, market);
+  const upd = (key, val) => setWallets(prev => ({ ...prev, [key]: val.trim() }));
+
+  const anyAddress = Object.values(wallets).some(Boolean);
+
+  return (
+    <div className="wallets-tab">
+      <div className="wallets-header">
+        <div>
+          <div className="wallets-title">🔍 Крипто гаманці</div>
+          <div className="wallets-subtitle">
+            Вставте адреси — баланс оновлюється автоматично кожні 5 хвилин
+          </div>
+        </div>
+        {anyAddress && (
+          <button className="live-refresh-btn" onClick={refresh} title="Оновити зараз">
+            ⟳ Оновити
+          </button>
+        )}
+      </div>
+
+      <div className="wallets-inputs">
+        {WALLET_CONFIGS.map(w => (
+          <div key={w.key} className="wallet-input-row">
+            <span className="wallet-coin-badge" style={{ color: w.color, borderColor: w.color + "44" }}>
+              {w.emoji} {w.label}
+            </span>
+            <input
+              className="wallet-address-input"
+              placeholder={w.placeholder}
+              value={wallets[w.key] || ""}
+              onChange={e => upd(w.key, e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+        ))}
+      </div>
+
+      {anyAddress && (
+        <div className="wallets-balances">
+          {WALLET_CONFIGS.map(w => {
+            if (!wallets[w.key]) return null;
+            const bal = balances[w.key];
+            const eurVal = bal != null ? bal * market[w.priceKey] : null;
+            const isLoading = loading[w.key];
+            const err = errors[w.key];
+
+            return (
+              <div key={w.key} className="wallet-balance-card" style={{ "--wcolor": w.color }}>
+                <div className="wbc-coin" style={{ color: w.color }}>{w.emoji} {w.label}</div>
+                {isLoading && <div className="wbc-loading">Завантаження…</div>}
+                {!isLoading && err && <div className="wbc-error">⚠ {err}</div>}
+                {!isLoading && !err && bal != null && (
+                  <>
+                    <div className="wbc-balance">{bal.toFixed(6)} {w.key.toUpperCase()}</div>
+                    <div className="wbc-eur">{fmtEUR(eurVal)}</div>
+                    <div className="wbc-price">@ {fmtEUR(market[w.priceKey])}/{w.key.toUpperCase()}</div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+
+          {totalEUR > 0 && (
+            <div className="wallets-total-card">
+              <span className="wallets-total-label">Загальна вартість</span>
+              <span className="wallets-total-value">{fmtEUR(totalEUR)}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!anyAddress && (
+        <div className="wallets-empty">
+          Введіть адресу гаманця вище щоб побачити поточний баланс в реальному часі
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Calculator Tab ────────────────────────────────────────────────────────────
 
 function CalcTab({ children, setChildren, instruments, market, monthlyPerChild, setMonthlyPerChild, devalPct, setDevalPct, allocation, setAllocation }) {
@@ -594,11 +873,23 @@ export default function App() {
   const [allocation, setAllocation] = useState(DEFAULT_ALLOCATION);
   const [scenarioA, setScenarioA] = useState({ monthlyPerChild: 100, allocation: { ovdp_peak: 50, btc: 50 } });
   const [scenarioB, setScenarioB] = useState({ monthlyPerChild: 110, allocation: { ovdp_peak: 50, btc: 50 } });
+  const [wallets, setWallets] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("df_wallets") || "{}"); } catch { return {}; }
+  });
+
+  // Persist wallets
+  useEffect(() => {
+    localStorage.setItem("df_wallets", JSON.stringify(wallets));
+  }, [wallets]);
+
+  const { loading: pricesLoading, error: pricesError, updatedAt, refresh: refreshPrices } =
+    useLivePrices(setMarket);
 
   const TABS = [
     { id: "calc",        label: "📊 Калькулятор" },
     { id: "instruments", label: "⚙️ Інструменти" },
     { id: "compare",     label: "⚖️ Порівняння" },
+    { id: "wallets",     label: "🔍 Гаманці" },
   ];
 
   return (
@@ -608,9 +899,29 @@ export default function App() {
       <header className="app-header">
         <div className="app-eyebrow">Дитячий капітал · DCA</div>
         <h1 className="app-title">Daughters Fund</h1>
-        <p className="app-subtitle">
-          BTC ≈ €{market.btcPriceEUR.toLocaleString()} · ETH ≈ €{market.ethPriceEUR.toLocaleString()} · {market.uahPerEUR} ₴/€ · 18.03.2026
-        </p>
+        <div className="live-bar">
+          <span className="live-price">₿ {market.btcPriceEUR.toLocaleString()}€</span>
+          <span className="live-sep">·</span>
+          <span className="live-price">Ξ {market.ethPriceEUR.toLocaleString()}€</span>
+          <span className="live-sep">·</span>
+          <span className="live-price">◎ {market.solPriceEUR}€</span>
+          <span className="live-sep">·</span>
+          <span className="live-price">{market.uahPerEUR} ₴/€</span>
+          <span className="live-sep live-gap" />
+          {pricesLoading && <span className="live-status loading">● оновлення…</span>}
+          {!pricesLoading && pricesError && <span className="live-status error" title={pricesError}>● офлайн</span>}
+          {!pricesLoading && !pricesError && updatedAt && (
+            <span className="live-status ok">● {fmtTime(updatedAt)}</span>
+          )}
+          <button
+            className="live-refresh-btn"
+            onClick={refreshPrices}
+            disabled={pricesLoading}
+            title="Оновити курси"
+          >
+            ⟳
+          </button>
+        </div>
       </header>
 
       <nav className="tab-nav" role="tablist" aria-label="Розділи">
@@ -649,11 +960,13 @@ export default function App() {
             market={market} devalPct={devalPct}
           />
         )}
+        {tab === "wallets" && (
+          <WalletsTab wallets={wallets} setWallets={setWallets} market={market} />
+        )}
       </main>
 
       <footer className="app-footer">
-        ⚠️ Курси станом на 18.03.2026. ОВДП рахується в гривні, конвертується в євро з урахуванням девальвації.
-        Ставки — реальні дані аукціону 06.01.2026. Не є фінансовою порадою.
+        ⚠️ Курси: CoinGecko + ECB (Frankfurter), оновлюються щогодини. ОВДП рахується в гривні з урахуванням девальвації. Не є фінансовою порадою.
       </footer>
     </div>
   );
