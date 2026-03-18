@@ -1,303 +1,660 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 
-const BTC_PRICE_EUR = 68000;
-const UAH_EUR_NOW = 51.10;
-const UAH_USD_NOW = 44.25;
+// ── Defaults ─────────────────────────────────────────────────────────────────
 
-const OVDP_STRATEGIES = [
-  { id: "short",  label: "Короткі (1.1 р.)",  rate: 16.35, desc: "Реінвест кожен рік, гнучкість" },
-  { id: "medium", label: "Середні (1.7 р.)",  rate: 17.1,  desc: "Баланс ставки та гнучкості" },
-  { id: "peak",   label: "3 роки (пік!)",     rate: 17.8,  desc: "Максимальна ставка зараз" },
-  { id: "long",   label: "Довгі (3.7 р.)",    rate: 14.6,  desc: "Нижча ставка, довший lock-in" },
+const DEFAULT_MARKET = {
+  btcPriceEUR: 68000,
+  ethPriceEUR: 2800,
+  solPriceEUR: 140,
+  uahPerEUR: 51.10,
+  usdPerEUR: 1.085,
+};
+
+const DEFAULT_INSTRUMENTS = [
+  { id: "ovdp_short",  type: "bond_uah", label: "ОВДП 1.1р.",   rate: 16.35, color: "#60a5fa", emoji: "🇺🇦" },
+  { id: "ovdp_medium", type: "bond_uah", label: "ОВДП 1.7р.",   rate: 17.10, color: "#60a5fa", emoji: "🇺🇦" },
+  { id: "ovdp_peak",   type: "bond_uah", label: "ОВДП 3р. ⭐",  rate: 17.80, color: "#4ade80", emoji: "🇺🇦" },
+  { id: "ovdp_long",   type: "bond_uah", label: "ОВДП 3.7р.",   rate: 14.60, color: "#60a5fa", emoji: "🇺🇦" },
+  { id: "eur_bond",    type: "bond_eur", label: "EUR облігації", rate: 4.50,  color: "#a78bfa", emoji: "🇪🇺" },
+  { id: "usd_bond",    type: "bond_usd", label: "USD облігації", rate: 5.20,  color: "#34d399", emoji: "🇺🇸" },
+  {
+    id: "btc", type: "crypto", label: "Bitcoin", color: "#f59e0b", emoji: "₿",
+    scenarios: [
+      { label: "Песимістичний", cagr: 15, color: "#ef4444" },
+      { label: "Базовий",       cagr: 30, color: "#f59e0b" },
+      { label: "Оптимістичний", cagr: 50, color: "#22c55e" },
+      { label: "BTC = 0",       cagr: 0,  color: "#6b7280" },
+    ],
+  },
+  {
+    id: "eth", type: "crypto", label: "Ethereum", color: "#818cf8", emoji: "Ξ",
+    scenarios: [
+      { label: "Песимістичний", cagr: 10, color: "#ef4444" },
+      { label: "Базовий",       cagr: 25, color: "#818cf8" },
+      { label: "Оптимістичний", cagr: 40, color: "#22c55e" },
+      { label: "ETH = 0",       cagr: 0,  color: "#6b7280" },
+    ],
+  },
+  {
+    id: "sol", type: "crypto", label: "Solana", color: "#a855f7", emoji: "◎",
+    scenarios: [
+      { label: "Песимістичний", cagr: 20, color: "#ef4444" },
+      { label: "Базовий",       cagr: 40, color: "#a855f7" },
+      { label: "Оптимістичний", cagr: 80, color: "#22c55e" },
+      { label: "SOL = 0",       cagr: 0,  color: "#6b7280" },
+    ],
+  },
 ];
 
-const BTC_SCENARIOS = [
-  { id: "pessimistic", label: "Песимістичний", cagr: 15, color: "#ef4444", emoji: "🐻" },
-  { id: "base",        label: "Базовий",       cagr: 30, color: "#f59e0b", emoji: "📈" },
-  { id: "optimistic",  label: "Оптимістичний", cagr: 50, color: "#22c55e", emoji: "🚀" },
-  { id: "zero",        label: "BTC = 0",        cagr: 0,  color: "#6b7280", emoji: "🔴" },
+const DEFAULT_CHILDREN = [
+  { id: "child1", name: "Донька 1", age: 3 },
+  { id: "child2", name: "Донька 2", age: 5 },
 ];
 
-function calcOVDP(monthlyEUR, years, annualRate, devalPct) {
+const DEFAULT_ALLOCATION = { ovdp_peak: 50, btc: 50 };
+
+// ── Calculations ─────────────────────────────────────────────────────────────
+
+function calcBondUAH(monthlyEUR, years, rate, devalPct, uahPerEUR) {
   const months = years * 12;
-  const monthlyUAHrate = annualRate / 100 / 12;
-  let totalUAH = 0;
+  const mr = rate / 100 / 12;
+  let total = 0;
   for (let m = 1; m <= months; m++) {
-    const uahPerEur = UAH_EUR_NOW * Math.pow(1 + devalPct / 100, m / 12);
-    const depositUAH = monthlyEUR * uahPerEur;
-    const monthsLeft = months - m;
-    totalUAH += depositUAH * Math.pow(1 + monthlyUAHrate, monthsLeft);
+    const uah = monthlyEUR * uahPerEUR * Math.pow(1 + devalPct / 100, m / 12);
+    total += uah * Math.pow(1 + mr, months - m);
   }
-  const finalUAHperEUR = UAH_EUR_NOW * Math.pow(1 + devalPct / 100, years);
-  return totalUAH / finalUAHperEUR;
+  return total / (uahPerEUR * Math.pow(1 + devalPct / 100, years));
 }
 
-function calcBTC(monthlyEUR, years, cagr) {
-  if (cagr === 0) return { totalEUR: 0, totalBTC: 0, avgEntry: 0, finalPrice: 0, yearly: [] };
+function calcBondFixed(monthlyEUR, years, rate) {
+  const months = years * 12;
+  const mr = rate / 100 / 12;
+  let total = 0;
+  for (let m = 1; m <= months; m++) {
+    total += monthlyEUR * Math.pow(1 + mr, months - m);
+  }
+  return total;
+}
+
+function calcCrypto(monthlyEUR, years, cagr, startPrice) {
+  if (cagr === 0) return { totalEUR: 0, coins: 0, avgEntry: 0, finalPrice: startPrice, yearly: [] };
   const months = years * 12;
   const mg = Math.pow(1 + cagr / 100, 1 / 12);
-  let totalBTC = 0, totalEURin = 0;
+  let coins = 0, eurIn = 0;
   const yearly = [];
   for (let m = 1; m <= months; m++) {
-    const price = BTC_PRICE_EUR * Math.pow(mg, m - 1);
-    totalBTC += monthlyEUR / price;
-    totalEURin += monthlyEUR;
+    const price = startPrice * Math.pow(mg, m - 1);
+    coins += monthlyEUR / price;
+    eurIn += monthlyEUR;
     if (m % 12 === 0) {
-      const priceNow = BTC_PRICE_EUR * Math.pow(mg, m);
-      yearly.push({ year: m / 12, btc: totalBTC, price: priceNow, eur: totalBTC * priceNow });
+      yearly.push({
+        year: m / 12,
+        coins,
+        price: startPrice * Math.pow(mg, m),
+        eur: coins * startPrice * Math.pow(mg, m),
+      });
     }
   }
-  const finalPrice = BTC_PRICE_EUR * Math.pow(1 + cagr / 100, years);
-  return { totalEUR: totalBTC * finalPrice, totalBTC, avgEntry: totalEURin / totalBTC, finalPrice, yearly };
+  const finalPrice = startPrice * Math.pow(1 + cagr / 100, years);
+  return { totalEUR: coins * finalPrice, coins, avgEntry: eurIn / coins, finalPrice, yearly };
 }
 
+function getStartPrice(inst, market) {
+  if (inst.id === "btc") return market.btcPriceEUR;
+  if (inst.id === "eth") return market.ethPriceEUR;
+  if (inst.id === "sol") return market.solPriceEUR;
+  return 1;
+}
+
+function calcInstrumentResult(inst, monthlyEUR, years, devalPct, market) {
+  if (!monthlyEUR || years <= 0) return { totalEUR: 0, scenarioResults: null };
+  if (inst.type === "bond_uah") {
+    return { totalEUR: calcBondUAH(monthlyEUR, years, inst.rate, devalPct, market.uahPerEUR), scenarioResults: null };
+  }
+  if (inst.type === "bond_eur") {
+    return { totalEUR: calcBondFixed(monthlyEUR, years, inst.rate), scenarioResults: null };
+  }
+  if (inst.type === "bond_usd") {
+    const monthlyUSD = monthlyEUR * market.usdPerEUR;
+    return { totalEUR: calcBondFixed(monthlyUSD, years, inst.rate) / market.usdPerEUR, scenarioResults: null };
+  }
+  if (inst.type === "crypto") {
+    const startPrice = getStartPrice(inst, market);
+    const scenarioResults = inst.scenarios.map(s => ({ ...s, ...calcCrypto(monthlyEUR, years, s.cagr, startPrice) }));
+    return { totalEUR: scenarioResults[1].totalEUR, scenarioResults };
+  }
+  return { totalEUR: 0, scenarioResults: null };
+}
+
+// ── Formatters ────────────────────────────────────────────────────────────────
+
 function fmtEUR(n) {
+  if (!isFinite(n) || isNaN(n)) return "—";
   if (Math.abs(n) >= 1_000_000) return "€" + (n / 1_000_000).toFixed(2) + "M";
   if (Math.abs(n) >= 1_000) return "€" + Math.round(n).toLocaleString("uk-UA");
   return "€" + n.toFixed(0);
 }
 
-function fmtBTC(b) {
-  if (b === 0) return "0.00000000 ₿";
-  return b.toFixed(8) + " ₿";
-}
+// ── UI Primitives ─────────────────────────────────────────────────────────────
 
-function OVDPPanel({ monthlyEUR, years, devalPct, label }) {
+function Slider({ label, value, setValue, min, max, step, suffix, note }) {
   return (
-    <div style={{ background: "rgba(96,165,250,0.05)", border: "1px solid rgba(96,165,250,0.15)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
-      <div style={{ fontSize: 11, color: "#60a5fa", letterSpacing: 2, textTransform: "uppercase", marginBottom: 12 }}>
-        🇺🇦 ОВДП — порівняння стратегій · {label}
+    <div className="slider-group">
+      <div className="slider-header">
+        <span className="slider-label">{label}</span>
+        <span className="slider-value">{value.toLocaleString("uk-UA")}{suffix}</span>
       </div>
-      <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 10 }}>
-        Актуальні ставки аукціон 6 січня 2026 · Девальвація {devalPct}%/рік врахована
-      </div>
-      <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ color: "#6b7280", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-            <td style={{ padding: "4px 6px" }}>Стратегія</td>
-            <td style={{ padding: "4px 6px", textAlign: "center" }}>Ставка</td>
-            <td style={{ padding: "4px 6px", textAlign: "right" }}>Підсумок</td>
-            <td style={{ padding: "4px 6px", textAlign: "right" }}>×</td>
-          </tr>
-        </thead>
-        <tbody>
-          {OVDP_STRATEGIES.map(s => {
-            const result = calcOVDP(monthlyEUR, years, s.rate, devalPct);
-            const invested = monthlyEUR * years * 12;
-            const isBest = s.id === "peak";
-            return (
-              <tr key={s.id} style={{ borderTop: "1px solid rgba(255,255,255,0.04)", background: isBest ? "rgba(34,197,94,0.06)" : "transparent" }}>
-                <td style={{ padding: "6px 6px" }}>
-                  <div style={{ color: isBest ? "#4ade80" : "#d1d5db", fontWeight: isBest ? 700 : 400 }}>{isBest ? "⭐ " : ""}{s.label}</div>
-                  <div style={{ fontSize: 10, color: "#6b7280" }}>{s.desc}</div>
-                </td>
-                <td style={{ padding: "6px 6px", textAlign: "center", color: isBest ? "#4ade80" : "#9ca3af", fontWeight: 700 }}>{s.rate}%</td>
-                <td style={{ padding: "6px 6px", textAlign: "right", color: "#f9fafb", fontWeight: 600 }}>{fmtEUR(result)}</td>
-                <td style={{ padding: "6px 6px", textAlign: "right", color: "#9ca3af", fontSize: 11 }}>×{(result / invested).toFixed(1)}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      <div style={{ marginTop: 10, fontSize: 10, color: "#6b7280", lineHeight: 1.5, padding: "8px 10px", background: "rgba(34,197,94,0.05)", borderRadius: 8 }}>
-        💡 <strong style={{ color: "#4ade80" }}>Висновок:</strong> Аналітики вважають поточні ставки піком. Зафіксувати 17.8% на 3 роки зараз — вигідніше. Різниця за {years} р. = {fmtEUR(calcOVDP(monthlyEUR, years, 17.8, devalPct) - calcOVDP(monthlyEUR, years, 16.35, devalPct))}.
+      {note && <div className="slider-note">{note}</div>}
+      <input
+        type="range" min={min} max={max} step={step} value={value}
+        onChange={e => setValue(Number(e.target.value))}
+        aria-label={label} aria-valuemin={min} aria-valuemax={max} aria-valuenow={value}
+      />
+      <div className="slider-range">
+        <span>{min}{suffix}</span>
+        <span>{max}{suffix}</span>
       </div>
     </div>
   );
 }
 
-function BTCCard({ scenario, btcData, ovdpTotal, invested, years }) {
-  const [summaryOpen, setSummaryOpen] = useState(false);
-  const [tableOpen, setTableOpen] = useState(false);
-  const total = btcData.totalEUR + ovdpTotal;
-  const mult = total / invested;
+function NumInput({ label, value, onChange, min = 0, max, step = 1, suffix }) {
+  return (
+    <div className="num-input-group">
+      {label && <label className="num-input-label">{label}</label>}
+      <div className="num-input-row">
+        <input
+          type="number" min={min} max={max} step={step} value={value}
+          onChange={e => onChange(Number(e.target.value))}
+          className="num-input" aria-label={label}
+        />
+        {suffix && <span className="rate-suffix">{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ── Allocation Editor ─────────────────────────────────────────────────────────
+
+function AllocationEditor({ instruments, allocation, setAllocation }) {
+  const total = Object.values(allocation).reduce((s, v) => s + (v || 0), 0);
+  const update = (id, val) => setAllocation(prev => ({ ...prev, [id]: val }));
+  return (
+    <div className="allocation-editor">
+      <div className="allocation-header">
+        <span className="allocation-title">Розподіл</span>
+        <span className={`allocation-total ${total > 100 ? "over" : total === 100 ? "ok" : ""}`}>
+          {total}% / 100%
+        </span>
+      </div>
+      {instruments.map(inst => (
+        <div key={inst.id} className="allocation-row">
+          <span className="allocation-label" style={{ color: inst.color }}>{inst.emoji} {inst.label}</span>
+          <div className="allocation-slider-row">
+            <input
+              type="range" min={0} max={100} step={5}
+              value={allocation[inst.id] || 0}
+              onChange={e => update(inst.id, Number(e.target.value))}
+              style={{ accentColor: inst.color }}
+              aria-label={`${inst.label} частка`}
+            />
+            <span className="allocation-pct">{allocation[inst.id] || 0}%</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Children Settings ─────────────────────────────────────────────────────────
+
+function ChildrenSettings({ children, setChildren }) {
+  const add = () => setChildren(prev => [...prev, { id: "c" + Date.now(), name: `Дитина ${prev.length + 1}`, age: 5 }]);
+  const remove = id => setChildren(prev => prev.filter(c => c.id !== id));
+  const upd = (id, field, val) => setChildren(prev => prev.map(c => c.id === id ? { ...c, [field]: val } : c));
+  return (
+    <div className="children-settings">
+      {children.map(child => (
+        <div key={child.id} className="child-settings-row">
+          <input
+            className="child-name-input" value={child.name}
+            onChange={e => upd(child.id, "name", e.target.value)}
+            aria-label="Ім'я дитини"
+          />
+          <div className="child-age-row">
+            <span className="rate-suffix">Вік:</span>
+            <input
+              type="number" min={0} max={17} step={1} value={child.age}
+              onChange={e => upd(child.id, "age", Number(e.target.value))}
+              className="rate-input" aria-label="Вік"
+            />
+            <span className="rate-suffix">р.</span>
+          </div>
+          {children.length > 1 && (
+            <button className="remove-btn" onClick={() => remove(child.id)} aria-label="Видалити">✕</button>
+          )}
+        </div>
+      ))}
+      <button className="add-btn" onClick={add}>+ Додати дитину</button>
+    </div>
+  );
+}
+
+// ── Instruments Settings Tab ──────────────────────────────────────────────────
+
+function InstrumentsSettings({ instruments, setInstruments, market, setMarket }) {
+  const updRate = (id, rate) => setInstruments(prev => prev.map(i => i.id === id ? { ...i, rate } : i));
+  const updCAGR = (id, idx, cagr) => setInstruments(prev => prev.map(i => {
+    if (i.id !== id) return i;
+    return { ...i, scenarios: i.scenarios.map((s, si) => si === idx ? { ...s, cagr } : s) };
+  }));
 
   return (
-    <div style={{ border: `1px solid ${summaryOpen ? scenario.color + "88" : scenario.color + "33"}`, borderLeft: `3px solid ${scenario.color}`, borderRadius: 12, marginBottom: 8, overflow: "hidden", transition: "border-color 0.2s", background: summaryOpen ? `${scenario.color}09` : "rgba(255,255,255,0.02)" }}>
-      <div style={{ padding: "12px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }} onClick={() => setSummaryOpen(p => !p)}>
-        <div>
-          <span style={{ color: scenario.color, fontWeight: 700, fontSize: 13 }}>{scenario.emoji} {scenario.label}</span>
-          {scenario.cagr > 0 && <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 6 }}>CAGR {scenario.cagr}%</span>}
+    <div className="settings-panel">
+      <section className="settings-section">
+        <h2 className="section-title">📊 Ринкові дані</h2>
+        <div className="settings-grid">
+          {[
+            { key: "btcPriceEUR", label: "BTC ціна", suffix: "€", step: 100 },
+            { key: "ethPriceEUR", label: "ETH ціна", suffix: "€", step: 10 },
+            { key: "solPriceEUR", label: "SOL ціна", suffix: "€", step: 1 },
+            { key: "uahPerEUR",   label: "₴/€ курс",  suffix: "₴", step: 0.1 },
+            { key: "usdPerEUR",   label: "$/€ курс",  suffix: "$", step: 0.001 },
+          ].map(f => (
+            <NumInput
+              key={f.key} label={f.label} suffix={f.suffix} step={f.step}
+              value={market[f.key]}
+              onChange={v => setMarket(prev => ({ ...prev, [f.key]: v }))}
+            />
+          ))}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ textAlign: "right" }}>
-            {summaryOpen ? (
-              <>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "#f9fafb" }}>{fmtEUR(total)}</div>
-                <div style={{ fontSize: 10, color: "#9ca3af" }}>BTC + ОВДП · ×{mult.toFixed(1)}</div>
-              </>
-            ) : (
-              <>
-                <div style={{ fontSize: 16, fontWeight: 700, color: scenario.color }}>{fmtEUR(btcData.totalEUR)}</div>
-                <div style={{ fontSize: 10, color: "#6b7280" }}>тільки BTC</div>
-              </>
-            )}
-          </div>
-          <span style={{ fontSize: 13, color: "#4b5563", transition: "transform 0.2s", display: "inline-block", transform: summaryOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▼</span>
-        </div>
-      </div>
+      </section>
 
-      {summaryOpen && (
-        <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", padding: "12px 14px", background: "rgba(0,0,0,0.18)" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
-            {[
-              { l: "₿ Bitcoin", v: fmtEUR(btcData.totalEUR), c: "#f59e0b" },
-              { l: "🇺🇦 ОВДП (пік 17.8%)", v: fmtEUR(ovdpTotal), c: "#60a5fa" },
-              { l: "💰 Разом", v: fmtEUR(total), c: scenario.color },
-            ].map(i => (
-              <div key={i.l} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
-                <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4 }}>{i.l}</div>
-                <div style={{ fontSize: 13, fontWeight: 800, color: i.c }}>{i.v}</div>
-              </div>
-            ))}
+      <section className="settings-section">
+        <h2 className="section-title">🏦 Облігації — ставки</h2>
+        {instruments.filter(i => i.type.startsWith("bond")).map(inst => (
+          <div key={inst.id} className="inst-row">
+            <span className="inst-label" style={{ color: inst.color }}>{inst.emoji} {inst.label}</span>
+            <div className="inst-rate-row">
+              <input
+                type="number" step={0.1} value={inst.rate}
+                onChange={e => updRate(inst.id, Number(e.target.value))}
+                className="rate-input" aria-label={`${inst.label} ставка`}
+              />
+              <span className="rate-suffix">%/рік</span>
+            </div>
           </div>
+        ))}
+      </section>
 
-          {scenario.cagr > 0 && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
-              {[
-                { l: "Накопичено BTC", v: fmtBTC(btcData.totalBTC), c: scenario.color },
-                { l: "Ціна BTC в фіналі", v: fmtEUR(btcData.finalPrice), c: "#f9fafb" },
-                { l: "Сер. ціна входу", v: fmtEUR(btcData.avgEntry), c: "#9ca3af" },
-              ].map(i => (
-                <div key={i.l} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4 }}>{i.l}</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: i.c, wordBreak: "break-all" }}>{i.v}</div>
+      <section className="settings-section">
+        <h2 className="section-title">🚀 Крипта — CAGR сценарії</h2>
+        {instruments.filter(i => i.type === "crypto").map(inst => (
+          <div key={inst.id} className="inst-block">
+            <div className="inst-block-title" style={{ color: inst.color }}>{inst.emoji} {inst.label}</div>
+            <div className="scenarios-grid">
+              {inst.scenarios.map((s, idx) => (
+                <div key={idx} className="scenario-input-row">
+                  <span className="scenario-input-label" style={{ color: s.color }}>{s.label}</span>
+                  <div className="inst-rate-row">
+                    <input
+                      type="number" step={1} value={s.cagr}
+                      onChange={e => updCAGR(inst.id, idx, Number(e.target.value))}
+                      className="rate-input" disabled={s.cagr === 0 && idx === inst.scenarios.length - 1}
+                      aria-label={`${inst.label} ${s.label} CAGR`}
+                    />
+                    <span className="rate-suffix">%</span>
+                  </div>
                 </div>
               ))}
             </div>
-          )}
+          </div>
+        ))}
+      </section>
+    </div>
+  );
+}
 
-          {scenario.cagr > 0 && (
-            <>
-              <button onClick={e => { e.stopPropagation(); setTableOpen(p => !p); }} style={{ width: "100%", padding: "7px 0", marginTop: 2, background: tableOpen ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#9ca3af", fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                <span>📅 По роках</span>
-                <span style={{ fontSize: 11, transition: "transform 0.2s", display: "inline-block", transform: tableOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▼</span>
-              </button>
-              {tableOpen && (
-                <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse", marginTop: 8 }}>
-                  <thead>
-                    <tr style={{ color: "#6b7280", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-                      <td style={{ padding: "3px 6px" }}>Рік</td>
-                      <td style={{ padding: "3px 6px", textAlign: "right" }}>BTC</td>
-                      <td style={{ padding: "3px 6px", textAlign: "right" }}>Ціна BTC</td>
-                      <td style={{ padding: "3px 6px", textAlign: "right" }}>Вартість</td>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {btcData.yearly.map(d => (
-                      <tr key={d.year} style={{ borderTop: "1px solid rgba(255,255,255,0.04)", background: d.year === years ? `${scenario.color}11` : "transparent", fontWeight: d.year === years ? 700 : 400, color: d.year === years ? "#f9fafb" : "#9ca3af" }}>
-                        <td style={{ padding: "4px 6px", color: d.year === years ? scenario.color : "#6b7280" }}>{d.year}{d.year === years ? " ✓" : ""}</td>
-                        <td style={{ padding: "4px 6px", textAlign: "right", fontFamily: "monospace", fontSize: 10 }}>{fmtBTC(d.btc)}</td>
-                        <td style={{ padding: "4px 6px", textAlign: "right" }}>{fmtEUR(d.price)}</td>
-                        <td style={{ padding: "4px 6px", textAlign: "right" }}>{fmtEUR(d.eur)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </>
-          )}
+// ── Child Result ──────────────────────────────────────────────────────────────
+
+function CryptoCard({ inst, result, invested, bondTotal }) {
+  const [open, setOpen] = useState(false);
+  const [tableOpen, setTableOpen] = useState(false);
+
+  return (
+    <div className={`crypto-card ${open ? "open" : ""}`} style={{ "--accent": inst.color }}>
+      <button
+        className="crypto-card-header" onClick={() => setOpen(p => !p)} aria-expanded={open}
+      >
+        <span className="crypto-card-title" style={{ color: inst.color }}>{inst.emoji} {inst.label}</span>
+        <div className="crypto-card-right">
+          {!open && result.scenarioResults?.filter(s => s.cagr > 0).map(s => (
+            <span key={s.cagr} className="scenario-pill" style={{ color: s.color }}>
+              {s.cagr}%→{fmtEUR(s.totalEUR)}
+            </span>
+          ))}
+          <span className={`chevron ${open ? "up" : ""}`}>▼</span>
+        </div>
+      </button>
+
+      {open && result.scenarioResults && (
+        <div className="crypto-card-body">
+          <div className="scenario-cards">
+            {result.scenarioResults.map((s, i) => {
+              const combined = s.totalEUR + bondTotal;
+              return (
+                <div key={i} className="scenario-detail-card" style={{ borderColor: s.color + "55" }}>
+                  <div className="s-name" style={{ color: s.color }}>{s.label}</div>
+                  {s.cagr > 0 && <div className="s-cagr">{s.cagr}% CAGR</div>}
+                  <div className="s-crypto">{fmtEUR(s.totalEUR)}</div>
+                  <div className="s-combined">+ бонди = {fmtEUR(combined)}</div>
+                  <div className="s-mult">×{isFinite(combined / invested) ? (combined / invested).toFixed(1) : "—"}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          {(() => {
+            const base = result.scenarioResults[1];
+            if (!base?.yearly?.length) return null;
+            return (
+              <>
+                <button className="table-toggle-btn" onClick={e => { e.stopPropagation(); setTableOpen(p => !p); }}>
+                  📅 По роках (базовий) {tableOpen ? "▲" : "▼"}
+                </button>
+                {tableOpen && (
+                  <div className="yearly-table-wrap">
+                    <table className="yearly-table">
+                      <thead>
+                        <tr><th>Рік</th><th>Монет</th><th>Ціна</th><th>Вартість</th></tr>
+                      </thead>
+                      <tbody>
+                        {base.yearly.map(d => (
+                          <tr key={d.year}>
+                            <td>{d.year}</td>
+                            <td className="mono">{d.coins.toFixed(6)}</td>
+                            <td>{fmtEUR(d.price)}</td>
+                            <td>{fmtEUR(d.eur)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
     </div>
   );
 }
 
-function DaughterBlock({ label, age, monthlyEUR, btcShare, devalPct, ovdpStratId }) {
-  const years = 18 - age;
-  const btcMonthly = monthlyEUR * btcShare / 100;
-  const ovdpMonthly = monthlyEUR * (1 - btcShare / 100);
-  const invested = monthlyEUR * years * 12;
-  const selStrat = OVDP_STRATEGIES.find(s => s.id === ovdpStratId) || OVDP_STRATEGIES[2];
-  const ovdpResult = calcOVDP(ovdpMonthly, years, selStrat.rate, devalPct);
-  const btcResults = useMemo(() => BTC_SCENARIOS.map(s => calcBTC(btcMonthly, years, s.cagr)), [btcMonthly, years]);
+function ChildResult({ child, monthlyPerChild, devalPct, allocation, instruments, market }) {
+  const years = 18 - child.age;
+  const invested = monthlyPerChild * Math.max(years, 0) * 12;
+
+  const results = useMemo(() => {
+    if (years <= 0) return [];
+    return instruments.map(inst => {
+      const pct = allocation[inst.id] || 0;
+      if (!pct) return null;
+      const monthly = monthlyPerChild * pct / 100;
+      return { inst, result: calcInstrumentResult(inst, monthly, years, devalPct, market) };
+    }).filter(Boolean);
+  }, [instruments, monthlyPerChild, devalPct, allocation, years, market]);
+
+  const bondResults = results.filter(r => r.inst.type !== "crypto");
+  const cryptoResults = results.filter(r => r.inst.type === "crypto");
+  const bondTotal = bondResults.reduce((s, r) => s + r.result.totalEUR, 0);
+  const cryptoBaseTotal = cryptoResults.reduce((s, r) => s + (r.result.scenarioResults?.[1]?.totalEUR || 0), 0);
+  const grandTotal = bondTotal + cryptoBaseTotal;
+
+  if (years <= 0) return (
+    <div className="child-result">
+      <div className="child-result-header">
+        <span className="child-emoji">👧</span>
+        <span className="child-result-name">{child.name}</span>
+        <span className="child-result-meta" style={{ color: "#ef4444" }}>Вже 18+</span>
+      </div>
+    </div>
+  );
 
   return (
-    <div style={{ marginBottom: 28 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-        <span style={{ fontSize: 20 }}>👧</span>
-        <span style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 700 }}>{label}</span>
-        <span style={{ fontSize: 12, color: "#9ca3af" }}>{age} р. → 18 р. = <strong style={{ color: "#f59e0b" }}>{years} р.</strong></span>
-        <span style={{ marginLeft: "auto", fontSize: 11, color: "#6b7280" }}>Внесено: {fmtEUR(invested)}</span>
+    <div className="child-result">
+      <div className="child-result-header">
+        <span className="child-emoji">👧</span>
+        <span className="child-result-name">{child.name}</span>
+        <span className="child-result-meta">{child.age}р. → 18р. = <strong>{years}р.</strong></span>
+        <span className="child-result-invested">Внесено: {fmtEUR(invested)}</span>
       </div>
-      <OVDPPanel monthlyEUR={ovdpMonthly} years={years} devalPct={devalPct} label={label} />
-      <div style={{ fontSize: 11, color: "#f59e0b", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
-        ₿ Bitcoin DCA · натисни сценарій → підсумок BTC + ОВДП
-      </div>
-      {BTC_SCENARIOS.map((s, i) => (
-        <BTCCard key={s.id} scenario={s} btcData={btcResults[i]} ovdpTotal={ovdpResult} invested={invested} years={years} />
-      ))}
-      <div style={{ background: "linear-gradient(135deg, rgba(245,158,11,0.08), rgba(34,197,94,0.08))", border: "1px solid rgba(245,158,11,0.2)", borderRadius: 12, padding: "12px 14px", marginTop: 8 }}>
-        <div style={{ fontSize: 10, color: "#f59e0b", letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>🏆 Загалом (BTC базовий + ОВДП 3р.)</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-          {[
-            { l: "BTC (30% CAGR)", v: fmtEUR(btcResults[1].totalEUR), c: "#f59e0b" },
-            { l: "ОВДП (17.8%)", v: fmtEUR(ovdpResult), c: "#60a5fa" },
-            { l: "Разом", v: fmtEUR(btcResults[1].totalEUR + ovdpResult), c: "#4ade80" },
-          ].map(i => (
-            <div key={i.l} style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 3 }}>{i.l}</div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: i.c }}>{i.v}</div>
+
+      {bondResults.length > 0 && (
+        <div className="bonds-panel">
+          <div className="panel-title">🏦 Облігації</div>
+          {bondResults.map(r => (
+            <div key={r.inst.id} className="bond-result-row">
+              <span className="bond-result-label" style={{ color: r.inst.color }}>
+                {r.inst.emoji} {r.inst.label}
+                <span className="bond-rate-badge">{r.inst.rate}%</span>
+              </span>
+              <span className="bond-result-total">{fmtEUR(r.result.totalEUR)}</span>
+              <span className="bond-result-mult">×{(r.result.totalEUR / invested).toFixed(1)}</span>
             </div>
           ))}
         </div>
-        <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, textAlign: "center" }}>
-          Множник: ×{((btcResults[1].totalEUR + ovdpResult) / invested).toFixed(1)} від вкладених {fmtEUR(invested)}
+      )}
+
+      {cryptoResults.length > 0 && (
+        <div className="crypto-section">
+          <div className="panel-title">🚀 Крипта · натисни → деталі</div>
+          {cryptoResults.map(r => (
+            <CryptoCard key={r.inst.id} inst={r.inst} result={r.result} invested={invested} bondTotal={bondTotal} />
+          ))}
         </div>
+      )}
+
+      {grandTotal > 0 && (
+        <div className="grand-total-bar">
+          <span className="grand-total-label">🏆 Разом (базовий сценарій)</span>
+          <span className="grand-total-value">{fmtEUR(grandTotal)}</span>
+          <span className="grand-total-mult">×{(grandTotal / invested).toFixed(1)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Compare Tab ───────────────────────────────────────────────────────────────
+
+function ScenarioCol({ label, scenario, setScenario, instruments }) {
+  const upd = (field, val) => setScenario(prev => ({ ...prev, [field]: val }));
+  const setAlloc = useCallback(fn => setScenario(prev => ({
+    ...prev, allocation: typeof fn === "function" ? fn(prev.allocation) : fn,
+  })), [setScenario]);
+
+  return (
+    <div className="compare-col">
+      <div className="compare-col-title">{label}</div>
+      <Slider
+        label="€/місяць на дитину" value={scenario.monthlyPerChild}
+        setValue={v => upd("monthlyPerChild", v)} min={10} max={1000} step={10} suffix=" €"
+      />
+      <AllocationEditor instruments={instruments} allocation={scenario.allocation} setAllocation={setAlloc} />
+    </div>
+  );
+}
+
+function CompareTab({ scenarioA, setScenarioA, scenarioB, setScenarioB, instruments, children, market, devalPct }) {
+  const results = useMemo(() => children.map(child => {
+    const years = Math.max(0, 18 - child.age);
+    const calc = (sc) => {
+      const invested = sc.monthlyPerChild * years * 12;
+      if (years <= 0) return { total: 0, invested: 0 };
+      let total = 0;
+      instruments.forEach(inst => {
+        const pct = sc.allocation[inst.id] || 0;
+        if (!pct) return;
+        const monthly = sc.monthlyPerChild * pct / 100;
+        const res = calcInstrumentResult(inst, monthly, years, devalPct, market);
+        total += inst.type === "crypto" ? (res.scenarioResults?.[1]?.totalEUR || 0) : res.totalEUR;
+      });
+      return { total, invested };
+    };
+    const a = calc(scenarioA);
+    const b = calc(scenarioB);
+    return { child, years, a, b, diff: b.total - a.total };
+  }), [scenarioA, scenarioB, instruments, children, market, devalPct]);
+
+  return (
+    <div className="compare-tab">
+      <div className="compare-configs">
+        <ScenarioCol label="Сценарій A" scenario={scenarioA} setScenario={setScenarioA} instruments={instruments} />
+        <ScenarioCol label="Сценарій B" scenario={scenarioB} setScenario={setScenarioB} instruments={instruments} />
+      </div>
+
+      <div className="compare-results">
+        <div className="panel-title">📊 Порівняння результатів (базовий CAGR крипти)</div>
+        {results.map(({ child, a, b, diff }) => (
+          <div key={child.id} className="compare-result-row">
+            <div className="compare-result-child">👧 {child.name}</div>
+            <div className="compare-cells">
+              <div className="compare-cell">
+                <div className="cc-label">A</div>
+                <div className="cc-total">{fmtEUR(a.total)}</div>
+                <div className="cc-mult">{a.invested > 0 ? `×${(a.total / a.invested).toFixed(1)}` : "—"}</div>
+              </div>
+              <div className="compare-cell compare-cell--b">
+                <div className="cc-label">B</div>
+                <div className="cc-total">{fmtEUR(b.total)}</div>
+                <div className="cc-mult">{b.invested > 0 ? `×${(b.total / b.invested).toFixed(1)}` : "—"}</div>
+              </div>
+              <div className={`compare-diff ${diff >= 0 ? "pos" : "neg"}`}>
+                {diff >= 0 ? "+" : ""}{fmtEUR(diff)}
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-export default function App() {
-  const [monthlyEUR, setMonthlyEUR] = useState(100);
-  const [btcShare, setBtcShare] = useState(50);
-  const [devalPct, setDevalPct] = useState(5);
-  const [age1, setAge1] = useState(3);
-  const [age2, setAge2] = useState(5);
+// ── Calculator Tab ────────────────────────────────────────────────────────────
 
-  const slider = (label, value, setter, min, max, step, suffix, note) => (
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontSize: 12, color: "#9ca3af" }}>{label}</span>
-        <span style={{ fontSize: 13, fontWeight: 700, color: "#fbbf24" }}>{value.toLocaleString("uk-UA")}{suffix}</span>
+function CalcTab({ children, setChildren, instruments, market, monthlyPerChild, setMonthlyPerChild, devalPct, setDevalPct, allocation, setAllocation }) {
+  const setAllocCb = useCallback(fn => setAllocation(prev => typeof fn === "function" ? fn(prev) : fn), [setAllocation]);
+
+  return (
+    <div className="calc-layout">
+      <div className="params-panel">
+        <div className="params-panel-title">Параметри</div>
+        <Slider
+          label="Внесок/місяць на дитину" value={monthlyPerChild}
+          setValue={setMonthlyPerChild} min={10} max={1000} step={10} suffix=" €"
+        />
+        <Slider
+          label="Девальвація гривні" value={devalPct} setValue={setDevalPct}
+          min={0} max={30} step={1} suffix="%/рік"
+          note={`${market.uahPerEUR} ₴/€ зараз → ~${Math.round(market.uahPerEUR * Math.pow(1 + devalPct / 100, 15))} ₴/€ через 15р.`}
+        />
+        <div className="separator" />
+        <AllocationEditor instruments={instruments} allocation={allocation} setAllocation={setAllocCb} />
+        <div className="separator" />
+        <div className="children-section-label">Діти</div>
+        <ChildrenSettings children={children} setChildren={setChildren} />
       </div>
-      {note && <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4 }}>{note}</div>}
-      <input type="range" min={min} max={max} step={step} value={value} onChange={e => setter(Number(e.target.value))} style={{ width: "100%", accentColor: "#f59e0b", cursor: "pointer" }} />
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#4b5563", marginTop: 1 }}>
-        <span>{min}{suffix}</span><span>{max}{suffix}</span>
+
+      <div className="results">
+        {children.map(child => (
+          <ChildResult
+            key={child.id}
+            child={child}
+            monthlyPerChild={monthlyPerChild}
+            devalPct={devalPct}
+            allocation={allocation}
+            instruments={instruments}
+            market={market}
+          />
+        ))}
       </div>
     </div>
   );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [tab, setTab] = useState("calc");
+  const [children, setChildren] = useState(DEFAULT_CHILDREN);
+  const [instruments, setInstruments] = useState(DEFAULT_INSTRUMENTS);
+  const [market, setMarket] = useState(DEFAULT_MARKET);
+  const [monthlyPerChild, setMonthlyPerChild] = useState(100);
+  const [devalPct, setDevalPct] = useState(5);
+  const [allocation, setAllocation] = useState(DEFAULT_ALLOCATION);
+  const [scenarioA, setScenarioA] = useState({ monthlyPerChild: 100, allocation: { ovdp_peak: 50, btc: 50 } });
+  const [scenarioB, setScenarioB] = useState({ monthlyPerChild: 110, allocation: { ovdp_peak: 50, btc: 50 } });
+
+  const TABS = [
+    { id: "calc",        label: "📊 Калькулятор" },
+    { id: "instruments", label: "⚙️ Інструменти" },
+    { id: "compare",     label: "⚖️ Порівняння" },
+  ];
 
   return (
-    <div style={{ minHeight: "100vh", background: "#080810", color: "#f9fafb", fontFamily: "'DM Sans', sans-serif", padding: "24px 16px 48px", maxWidth: 500, margin: "0 auto" }}>
+    <div className="app">
       <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-      <div style={{ textAlign: "center", marginBottom: 28 }}>
-        <div style={{ fontSize: 10, letterSpacing: 3, color: "#f59e0b", textTransform: "uppercase", marginBottom: 6 }}>Дитячий капітал · DCA в євро</div>
-        <h1 style={{ fontFamily: "'Playfair Display', serif", fontSize: 26, fontWeight: 900, margin: 0, background: "linear-gradient(135deg, #f9fafb 0%, #f59e0b 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>Bitcoin + ОВДП</h1>
-        <p style={{ fontSize: 12, color: "#6b7280", margin: "6px 0 0" }}>BTC ≈ €{BTC_PRICE_EUR.toLocaleString()} · Банк: {UAH_EUR_NOW} ₴/€ · {UAH_USD_NOW} ₴/$ · 18.03.2026</p>
-      </div>
-      <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 14, padding: "18px 18px 8px", marginBottom: 28 }}>
-        <div style={{ fontSize: 10, letterSpacing: 2, color: "#f59e0b", textTransform: "uppercase", marginBottom: 14 }}>Параметри</div>
-        {slider("Внесок/місяць на кожну дочку", monthlyEUR, setMonthlyEUR, 50, 500, 10, " €")}
-        {slider("Частка Bitcoin", btcShare, setBtcShare, 0, 100, 5, "%")}
-        {slider("Девальвація гривні", devalPct, setDevalPct, 0, 20, 1, "%/рік", `Поточний курс ~${UAH_EUR_NOW} ₴/€ → через 15р. буде ~${Math.round(UAH_EUR_NOW * Math.pow(1 + devalPct / 100, 15))} ₴/€`)}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div>{slider("Вік дочки 1", age1, setAge1, 1, 17, 1, " р.")}</div>
-          <div>{slider("Вік дочки 2", age2, setAge2, 1, 17, 1, " р.")}</div>
-        </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", paddingBottom: 10 }}>
-          {[`₿ €${Math.round(monthlyEUR * btcShare / 100)}/міс`, `🇺🇦 €${Math.round(monthlyEUR * (1 - btcShare / 100))}/міс`, `💰 €${monthlyEUR * 2}/міс разом`].map(t => (
-            <span key={t} style={{ background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: 20, padding: "3px 10px", fontSize: 11, color: "#fbbf24" }}>{t}</span>
-          ))}
-        </div>
-      </div>
-      <DaughterBlock label="Донька 1" age={age1} monthlyEUR={monthlyEUR} btcShare={btcShare} devalPct={devalPct} ovdpStratId="peak" />
-      <DaughterBlock label="Донька 2" age={age2} monthlyEUR={monthlyEUR} btcShare={btcShare} devalPct={devalPct} ovdpStratId="peak" />
-      <div style={{ background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.12)", borderRadius: 12, padding: "12px 14px", fontSize: 11, color: "#6b7280", lineHeight: 1.6 }}>
-        <strong style={{ color: "#f87171" }}>⚠️</strong> Курси станом на 18.03.2026: НБУ €/₴ = 50,63; банківський продаж €/₴ = 51,10; $/₴ = 44,25. ОВДП рахується в гривні, конвертується в євро по майбутньому курсу з урахуванням девальвації. BTC — напряму в EUR. Ставки ОВДП — реальні дані аукціону 06.01.2026. Не є фінансовою порадою.
-      </div>
+
+      <header className="app-header">
+        <div className="app-eyebrow">Дитячий капітал · DCA</div>
+        <h1 className="app-title">Daughters Fund</h1>
+        <p className="app-subtitle">
+          BTC ≈ €{market.btcPriceEUR.toLocaleString()} · ETH ≈ €{market.ethPriceEUR.toLocaleString()} · {market.uahPerEUR} ₴/€ · 18.03.2026
+        </p>
+      </header>
+
+      <nav className="tab-nav" role="tablist" aria-label="Розділи">
+        {TABS.map(t => (
+          <button
+            key={t.id} role="tab" aria-selected={tab === t.id}
+            className={`tab-btn ${tab === t.id ? "active" : ""}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      <main className="app-main">
+        {tab === "calc" && (
+          <CalcTab
+            children={children} setChildren={setChildren}
+            instruments={instruments} market={market}
+            monthlyPerChild={monthlyPerChild} setMonthlyPerChild={setMonthlyPerChild}
+            devalPct={devalPct} setDevalPct={setDevalPct}
+            allocation={allocation} setAllocation={setAllocation}
+          />
+        )}
+        {tab === "instruments" && (
+          <InstrumentsSettings
+            instruments={instruments} setInstruments={setInstruments}
+            market={market} setMarket={setMarket}
+          />
+        )}
+        {tab === "compare" && (
+          <CompareTab
+            scenarioA={scenarioA} setScenarioA={setScenarioA}
+            scenarioB={scenarioB} setScenarioB={setScenarioB}
+            instruments={instruments} children={children}
+            market={market} devalPct={devalPct}
+          />
+        )}
+      </main>
+
+      <footer className="app-footer">
+        ⚠️ Курси станом на 18.03.2026. ОВДП рахується в гривні, конвертується в євро з урахуванням девальвації.
+        Ставки — реальні дані аукціону 06.01.2026. Не є фінансовою порадою.
+      </footer>
     </div>
   );
 }
