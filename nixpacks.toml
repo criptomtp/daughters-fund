@@ -7,5 +7,5 @@ cmds = ["npm install --include=dev"]
 [phases.build]
 cmds = ["npm run build"]
 
-[start]
-cmd = "npx serve dist -l $PORT"
+# NOTE: the runtime start command is defined in railway.json (deploy.startCommand),
+# which overrides any Nixpacks [start] block, so it is intentionally omitted here.

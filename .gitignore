@@ -22,3 +22,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Secrets / env
+.env
+.env.*
+
+# AI agent tooling & local state (may contain cached session data)
+.claude/
+.claude-flow/
+.swarm/
+.mcp.json

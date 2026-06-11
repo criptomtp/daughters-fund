@@ -963,6 +963,16 @@ input[type="range"] {
   gap: 10px;
 }
 
+.wallets-privacy-notice {
+  background: rgba(248, 113, 113, 0.06);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 11px;
+  color: #c4b5fd;
+  line-height: 1.55;
+}
+
 .wallet-input-row {
   display: flex;
   align-items: center;

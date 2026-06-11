@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
+import { PortfolioTab } from "./portfolio/PortfolioTab.jsx";
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -162,7 +163,8 @@ function calcInstrumentResult(inst, monthlyEUR, years, devalPct, market) {
   if (inst.type === "crypto") {
     const startPrice = getStartPrice(inst, market);
     const scenarioResults = inst.scenarios.map(s => ({ ...s, ...calcCrypto(monthlyEUR, years, s.cagr, startPrice) }));
-    return { totalEUR: scenarioResults[1].totalEUR, scenarioResults };
+    const base = scenarioResults.find(s => s.label === "Базовий") ?? scenarioResults[1] ?? scenarioResults[0];
+    return { totalEUR: base ? base.totalEUR : 0, scenarioResults };
   }
   return { totalEUR: 0, scenarioResults: null };
 }
@@ -194,13 +196,16 @@ function useLivePrices(setMarket) {
         fetch("https://api.frankfurter.app/latest?from=EUR&to=UAH,USD"),
       ]);
       const [crypto, fx] = await Promise.all([cryptoRes.json(), fxRes.json()]);
+      // Accept only finite, positive numbers — a zero/garbled API response must
+      // not silently overwrite a price that feeds portfolio valuations.
+      const pos = (v, fallback) => (Number.isFinite(v) && v > 0 ? v : fallback);
       setMarket(prev => ({
         ...prev,
-        btcPriceEUR: Math.round(crypto.bitcoin?.eur ?? prev.btcPriceEUR),
-        ethPriceEUR: Math.round(crypto.ethereum?.eur ?? prev.ethPriceEUR),
-        solPriceEUR: +((crypto.solana?.eur ?? prev.solPriceEUR).toFixed(2)),
-        usdPerEUR:   +((fx.rates?.USD ?? prev.usdPerEUR).toFixed(4)),
-        uahPerEUR:   +((fx.rates?.UAH ?? prev.uahPerEUR).toFixed(2)),
+        btcPriceEUR: Math.round(pos(crypto.bitcoin?.eur, prev.btcPriceEUR)),
+        ethPriceEUR: Math.round(pos(crypto.ethereum?.eur, prev.ethPriceEUR)),
+        solPriceEUR: +(pos(crypto.solana?.eur, prev.solPriceEUR).toFixed(2)),
+        usdPerEUR:   +(pos(fx.rates?.USD, prev.usdPerEUR).toFixed(4)),
+        uahPerEUR:   +(pos(fx.rates?.UAH, prev.uahPerEUR).toFixed(2)),
       }));
       setLiveStatus({ loading: false, error: null, updatedAt: new Date() });
     } catch {
@@ -220,7 +225,7 @@ function useLivePrices(setMarket) {
 // ── Wallet Balance Fetchers ───────────────────────────────────────────────────
 
 async function fetchBTCBalance(address) {
-  const r = await fetch(`https://blockchain.info/q/addressbalance/${address}?cors=true`);
+  const r = await fetch(`https://blockchain.info/q/addressbalance/${encodeURIComponent(address)}?cors=true`);
   const txt = await r.text();
   const n = parseInt(txt, 10);
   if (isNaN(n)) throw new Error("Невірна відповідь");
@@ -229,11 +234,12 @@ async function fetchBTCBalance(address) {
 
 async function fetchETHBalance(address) {
   const r = await fetch(
-    `https://api.etherscan.io/api?module=account&action=balance&address=${address}&tag=latest`
+    `https://api.etherscan.io/api?module=account&action=balance&address=${encodeURIComponent(address)}&tag=latest`
   );
   const d = await r.json();
   if (d.status !== "1") throw new Error(d.message || "Помилка");
-  return parseInt(d.result, 10) / 1e18;
+  // wei is a >18-digit integer string — parse via BigInt to avoid Number precision loss.
+  return Number(BigInt(d.result)) / 1e18;
 }
 
 async function fetchSOLBalance(address) {
@@ -247,6 +253,19 @@ async function fetchSOLBalance(address) {
   return d.result.value / 1e9;
 }
 
+// ── Wallet address validation ─────────────────────────────────────────────────
+
+const WALLET_ADDRESS_RE = {
+  btc: /^(bc1[a-z0-9]{6,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,62})$/i,
+  eth: /^0x[0-9a-fA-F]{40}$/,
+  sol: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/,
+};
+
+function isValidWalletAddress(key, addr) {
+  const re = WALLET_ADDRESS_RE[key];
+  return !!addr && !!re && re.test(addr);
+}
+
 // ── Wallet Balances Hook ──────────────────────────────────────────────────────
 
 function useWalletBalances(wallets, market) {
@@ -255,10 +274,12 @@ function useWalletBalances(wallets, market) {
   const [errors, setErrors]   = useState({});
 
   const refresh = useCallback(async () => {
+    // Only fetch for fully-valid addresses → no requests fired on every keystroke
+    // while typing, and no garbage sent to the public APIs.
     const fetchers = {
-      btc: wallets.btc ? () => fetchBTCBalance(wallets.btc) : null,
-      eth: wallets.eth ? () => fetchETHBalance(wallets.eth) : null,
-      sol: wallets.sol ? () => fetchSOLBalance(wallets.sol) : null,
+      btc: isValidWalletAddress("btc", wallets.btc) ? () => fetchBTCBalance(wallets.btc) : null,
+      eth: isValidWalletAddress("eth", wallets.eth) ? () => fetchETHBalance(wallets.eth) : null,
+      sol: isValidWalletAddress("sol", wallets.sol) ? () => fetchSOLBalance(wallets.sol) : null,
     };
     const keys = Object.keys(fetchers).filter(k => fetchers[k]);
     if (!keys.length) return;
@@ -540,7 +561,7 @@ function CryptoCard({ inst, result, invested, bondTotal }) {
           </div>
 
           {(() => {
-            const base = result.scenarioResults[1];
+            const base = result.scenarioResults.find(s => s.label === "Базовий") ?? result.scenarioResults[1];
             if (!base?.yearly?.length) return null;
             return (
               <>
@@ -758,6 +779,10 @@ function WalletsTab({ wallets, setWallets, market }) {
         )}
       </div>
 
+      <div className="wallets-privacy-notice">
+        🔒 Адреси надсилаються до публічних сервісів blockchain.info, etherscan.io, mainnet-beta.solana.com для отримання балансу. Це означає, що ваш IP буде пов'язаний з цими адресами на тих сервісах. Якщо приватність критична — не вводьте сюди адреси.
+      </div>
+
       <div className="wallets-inputs">
         {WALLET_CONFIGS.map(w => (
           <div key={w.key} className="wallet-input-row">
@@ -784,13 +809,15 @@ function WalletsTab({ wallets, setWallets, market }) {
             const eurVal = bal != null ? bal * market[w.priceKey] : null;
             const isLoading = loading[w.key];
             const err = errors[w.key];
+            const invalid = !isValidWalletAddress(w.key, wallets[w.key]);
 
             return (
               <div key={w.key} className="wallet-balance-card" style={{ "--wcolor": w.color }}>
                 <div className="wbc-coin" style={{ color: w.color }}>{w.emoji} {w.label}</div>
-                {isLoading && <div className="wbc-loading">Завантаження…</div>}
-                {!isLoading && err && <div className="wbc-error">⚠ {err}</div>}
-                {!isLoading && !err && bal != null && (
+                {invalid && <div className="wbc-error">⚠ Невірний формат адреси</div>}
+                {!invalid && isLoading && <div className="wbc-loading">Завантаження…</div>}
+                {!invalid && !isLoading && err && <div className="wbc-error">⚠ {err}</div>}
+                {!invalid && !isLoading && !err && bal != null && (
                   <>
                     <div className="wbc-balance">{bal.toFixed(6)} {w.key.toUpperCase()}</div>
                     <div className="wbc-eur">{fmtEUR(eurVal)}</div>
@@ -882,6 +909,12 @@ export default function App() {
     localStorage.setItem("df_wallets", JSON.stringify(wallets));
   }, [wallets]);
 
+  // Publish current FX rates (units per EUR) for the portfolio side: GoalsPanel
+  // reads df_fx_rates to convert multi-currency holdings toward a goal currency.
+  useEffect(() => {
+    localStorage.setItem("df_fx_rates", JSON.stringify({ UAH: market.uahPerEUR, USD: market.usdPerEUR, EUR: 1 }));
+  }, [market.uahPerEUR, market.usdPerEUR]);
+
   const { loading: pricesLoading, error: pricesError, updatedAt, refresh: refreshPrices } =
     useLivePrices(setMarket);
 
@@ -889,13 +922,12 @@ export default function App() {
     { id: "calc",        label: "📊 Калькулятор" },
     { id: "instruments", label: "⚙️ Інструменти" },
     { id: "compare",     label: "⚖️ Порівняння" },
+    { id: "portfolio",   label: "📋 Портфель" },
     { id: "wallets",     label: "🔍 Гаманці" },
   ];
 
   return (
     <div className="app">
-      <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-
       <header className="app-header">
         <div className="app-eyebrow">Дитячий капітал · DCA</div>
         <h1 className="app-title">Daughters Fund</h1>
@@ -960,6 +992,7 @@ export default function App() {
             market={market} devalPct={devalPct}
           />
         )}
+        {tab === "portfolio" && <PortfolioTab />}
         {tab === "wallets" && (
           <WalletsTab wallets={wallets} setWallets={setWallets} market={market} />
         )}
