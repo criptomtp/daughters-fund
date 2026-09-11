@@ -316,8 +316,15 @@ export function accountSummary({
   let scheduledNext12m = 0;
   const byCurrency = {};
 
+  // Множина всіх переданих лотів, включно із закритими: закритий лот більше не
+  // має вартості, але купони, які він устиг заплатити цьогоріч, отримані
+  // по-справжньому й мають лишитись у підсумку.
+  const lotIds = new Set(lots.map(l => l.id));
+
   const lotCurrency = new Map();
   for (const lot of lots) {
+    const bond0 = bondsByIsin.get(lot.isin);
+    if (bond0) lotCurrency.set(lot.id, bond0.currency || "UAH");
     if (lot.closedAt && String(lot.closedAt).slice(0, 10) <= String(asOfDate).slice(0, 10)) continue;
     const inv = lotInvested(lot);
     invested += inv;
@@ -340,6 +347,10 @@ export function accountSummary({
   const yearStartDay = yearStart.slice(0, 10);
   const yearAheadDay = yearAhead.slice(0, 10);
   for (const c of coupons) {
+    // Виплата рахується, лише якщо її лот серед переданих. Без цієї перевірки
+    // у простір, де своїх паперів ще немає, затікали ВСІ купони портфеля —
+    // на екрані стояла сума, якої власник кишені ніколи не отримував.
+    if (!lotIds.has(c.lotId)) continue;
     const cur = lotCurrency.get(c.lotId) || "UAH";
     if (c.status === "received" && c.actualDate && c.actualDate.slice(0, 10) >= yearStartDay) {
       const amt = c.actualAmount ?? c.amountNet ?? 0;
@@ -493,39 +504,38 @@ export function cashByPocketFrom(txs) {
   return out;
 }
 
+/** Усі монети рахунку разом — для звірки з тим, що показує біржа. */
+export function accountCoins(account) {
+  const total = {};
+  for (const perPocket of Object.values(account?.holdingsByPocket || {})) {
+    for (const [coin, amt] of Object.entries(perPocket || {})) {
+      total[coin] = Math.round(((total[coin] || 0) + (Number(amt) || 0)) * 1e8) / 1e8;
+    }
+  }
+  return total;
+}
+
+/** Монети однієї кишені на одному рахунку. */
+export function pocketCoins(account, pocketId) {
+  return (account?.holdingsByPocket || {})[pocketId] || {};
+}
+
 /**
- * Вартість монет на біржових рахунках, рознесена по кишенях.
+ * Вартість монет, рознесена по кишенях.
  *
- * Залишок монет лежить одним числом на рахунку — окремої позначки власника
- * в ньому немає. Тому ділимо його пропорційно тому, скільки кожна кишеня
- * витратила на купівлю крипти саме на цьому рахунку. Якщо купівель немає —
- * пропорційно внескам. Якщо й тих немає, залишок нікуди не потрапляє, і це
- * краще, ніж мовчки віддати його комусь одному.
+ * Власник кожної монети записаний прямо, тому ділити нічого не треба:
+ * функція лише переоцінює те, що вже належить кишені. `priceOf` віддає
+ * ціну монети в гривні — курси живуть в іншому шарі.
  */
-export function extraByPocketFrom({ accounts = [], txs = [], valueByAccountId = new Map() }) {
+export function extraByPocketFrom({ accounts = [], priceOf = () => 0 }) {
   const out = new Map();
   for (const acc of accounts) {
-    const value = Number(valueByAccountId.get?.(acc.id) ?? valueByAccountId[acc.id] ?? 0) || 0;
-    if (!value) continue;
-
-    const accTxs = (txs || []).filter(t => t.accountId === acc.id && t.pocketId);
-    let weights = new Map();
-    for (const t of accTxs) {
-      if (t.kind !== "crypto_buy") continue;
-      weights.set(t.pocketId, (weights.get(t.pocketId) || 0) + Math.abs(Number(t.amount) || 0));
-    }
-    if (weights.size === 0) {
-      for (const t of accTxs) {
-        if (t.kind !== "deposit") continue;
-        weights.set(t.pocketId, (weights.get(t.pocketId) || 0) + Math.abs(Number(t.amount) || 0));
+    for (const [pocketId, coins] of Object.entries(acc.holdingsByPocket || {})) {
+      let v = 0;
+      for (const [coin, amt] of Object.entries(coins || {})) {
+        v += (priceOf(coin) || 0) * (Number(amt) || 0);
       }
-    }
-    let total = 0;
-    for (const w of weights.values()) total += w;
-    if (total <= 0) continue;
-
-    for (const [pocketId, w] of weights) {
-      out.set(pocketId, (out.get(pocketId) || 0) + value * (w / total));
+      if (v) out.set(pocketId, (out.get(pocketId) || 0) + v);
     }
   }
   return out;

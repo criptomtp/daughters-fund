@@ -153,28 +153,20 @@ export function buildSeries({
 }) {
   const exchangeIds = new Set(accounts.filter(a => a.kind === "exchange").map(a => a.id));
 
-  // Монети лежать на рахунку одним числом, без позначки власника. Частку
-  // кишені беремо з того, скільки вона витратила на купівлю крипти саме тут —
-  // те саме правило, що й у миттєвій оцінці, щоб графік і цифра над ним
-  // не розходились.
-  const coinShare = (accountId) => {
-    if (!pocketId) return 1;
-    const buys = transactions.filter(t => t.accountId === accountId && t.kind === "crypto_buy" && t.pocketId);
-    const rows = buys.length
-      ? buys
-      : transactions.filter(t => t.accountId === accountId && t.kind === "deposit" && t.pocketId);
-    let total = 0, mine = 0;
-    for (const t of rows) {
-      const v = Math.abs(Number(t.amount) || 0);
-      total += v;
-      if (t.pocketId === pocketId) mine += v;
-    }
-    return total > 0 ? mine / total : 0;
+  // Монети мають власника прямо в даних, тож беремо частку кишені, а не
+  // вгадуємо її пропорцією витрат: сторони заходили за різною ціною, і
+  // гривня, поділена навпіл, монети навпіл не ділить.
+  const coinsOf = (acc) => {
+    const byPocket = acc.holdingsByPocket || {};
+    if (pocketId) return Number(byPocket[pocketId]?.BTC) || 0;
+    let s = 0;
+    for (const coins of Object.values(byPocket)) s += Number(coins?.BTC) || 0;
+    return s;
   };
 
   const holdingsTotal = accounts
     .filter(a => a.kind === "exchange")
-    .reduce((s, a) => s + (Number(a.holdings?.BTC) || 0) * coinShare(a.id), 0);
+    .reduce((s, a) => s + coinsOf(a), 0);
 
   if (pocketId) {
     lots = lots.filter(l => l.pocketId === pocketId);

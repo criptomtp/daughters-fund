@@ -5,7 +5,7 @@ import { useLots } from "./hooks/useLots.js";
 import { useBonds } from "./hooks/useBonds.js";
 import { accounts as accountsRepo } from "./repository.js";
 import { ageInYears, goalProgress, avgMonthlyDeposits, projectedAtRate,
-  cashByPocketFrom, extraByPocketFrom, pocketShare } from "./calculations.js";
+  cashByPocketFrom, extraByPocketFrom, pocketShare, pocketCoins, accountCoins } from "./calculations.js";
 import { useTransactions, useCashBalance } from "./hooks/useTransactions.js";
 import { coinPriceUAH, COINS } from "./useMarket.js";
 import { BUILD_ID } from "../buildId.js";
@@ -67,7 +67,7 @@ export function DetailsScreen({ open, onOpen, onClose, market, pocket }) {
         {open === "kids" && <KidsPanel market={market} pocket={pocket} />}
         {open === "pockets" && <PocketsPanel />}
         {open === "positions" && <PositionsPanel pocket={pocket} />}
-        {open === "accounts" && <AccountsPanel market={market} />}
+        {open === "accounts" && <AccountsPanel market={market} pocket={pocket} />}
         {open === "bonds" && <BondsManager />}
         {open === "records" && <RecordsPanel pocket={pocket} />}
         {open === "analytics" && <AnalyticsPanel pocket={pocket} />}
@@ -117,14 +117,8 @@ function KidsPanel({ market, pocket }) {
 
   const cryptoAccounts = accounts.filter(a => a.kind === "exchange");
   const extraByPocket = extraByPocketFrom({
-    accounts: cryptoAccounts, txs,
-    valueByAccountId: new Map(cryptoAccounts.map(a => [
-      a.id,
-      Object.entries(a.holdings || {}).reduce((s, [t, amt]) => {
-        const p = coinPriceUAH(t, market);
-        return s + (p ? p * (Number(amt) || 0) : 0);
-      }, 0),
-    ])),
+    accounts: cryptoAccounts,
+    priceOf: (ticker) => coinPriceUAH(ticker, market) || 0,
   });
   const cashByPocket = cashByPocketFrom(txs);
 
@@ -234,22 +228,31 @@ function KidsPanel({ market, pocket }) {
 
 // ── Рахунки ────────────────────────────────────────────────────────────────
 
-function AccountsPanel({ market }) {
+function AccountsPanel({ market, pocket }) {
   const { list: accounts } = useAccounts();
   const exchanges = accounts.filter(a => a.kind === "exchange");
 
   return (
     <div className="panel">
-      {exchanges.map(a => <CryptoAccountCard key={a.id} account={a} market={market} />)}
+      {exchanges.map(a => <CryptoAccountCard key={a.id} account={a} market={market} pocket={pocket} />)}
       <AccountsManager />
     </div>
   );
 }
 
-function CryptoAccountCard({ account, market }) {
-  const holdings = account.holdings || {};
+function CryptoAccountCard({ account, market, pocket }) {
+  // Залишок вводиться для КОНКРЕТНОЇ кишені. Спільне число тут було б
+  // неправдою: біржа показує суму монет обох сторін, а належить кожна
+  // монета комусь одному.
+  const pocketId = pocket?.id || null;
+  const mine = pocketCoins(account, pocketId);
   const [draft, setDraft] = useState(() =>
-    Object.fromEntries(COINS.map(c => [c, holdings[c] ?? ""])));
+    Object.fromEntries(COINS.map(c => [c, mine[c] ?? ""])));
+  const [seenPocket, setSeenPocket] = useState(pocketId);
+  if (pocketId !== seenPocket) {
+    setSeenPocket(pocketId);
+    setDraft(Object.fromEntries(COINS.map(c => [c, mine[c] ?? ""])));
+  }
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const balances = useCashBalance(account.id);
@@ -259,13 +262,18 @@ function CryptoAccountCard({ account, market }) {
     return s + (p ? p * (Number(draft[c]) || 0) : 0);
   }, 0);
   const invested = balances.UAH != null ? -(balances.UAH) : 0;
+  const total = accountCoins(account);
 
   const save = async () => {
+    if (!pocketId) { setErr("Спершу обери простір"); return; }
     setBusy(true); setErr(null);
     try {
       const next = {};
       for (const c of COINS) if (Number(draft[c]) > 0) next[c] = Number(draft[c]);
-      await accountsRepo.update(account.id, { holdings: next, holdingsAt: new Date().toISOString() });
+      const byPocket = { ...(account.holdingsByPocket || {}), [pocketId]: next };
+      await accountsRepo.update(account.id, {
+        holdingsByPocket: byPocket, holdingsAt: new Date().toISOString(),
+      });
     } catch (e) { setErr(e.message); }
     finally { setBusy(false); }
   };
@@ -274,7 +282,9 @@ function CryptoAccountCard({ account, market }) {
     <section className="crypto-card">
       <h3 className="panel-title">{account.name}</h3>
       <p className="form-hint">
-        Біржа не віддає дані в браузер, тому залишок вводиться руками. Переоцінка — автоматична.
+        Біржа не віддає дані в браузер, тому залишок вводиться руками.
+        Тут — частка кишені «{pocket?.name || "—"}». На біржі разом:{" "}
+        {Object.entries(total).map(([c, a]) => `${a} ${c}`).join(" · ") || "нічого"}.
       </p>
       <div className="crypto-grid">
         {COINS.map(c => (

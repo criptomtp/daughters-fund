@@ -1,6 +1,6 @@
 import Dexie from "dexie";
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 class PortfolioDB extends Dexie {
   constructor() {
@@ -232,7 +232,73 @@ class PortfolioDB extends Dexie {
       await tx.table("lots").bulkPut(next.lots);
       await tx.table("cashTransactions").bulkPut(next.cashTransactions);
     });
+
+    // v8 — монети теж мають власника. Досі залишок лежав на рахунку одним
+    // числом, і частку кишені доводилось вгадувати пропорцією витрат на
+    // купівлю. Здогадка помиляється щоразу, коли сторони купували за різною
+    // ціною: той, хто заходив дорожче, отримав менше монет за ті самі гроші.
+    this.version(8).stores({
+      persons:  "id, type, name",
+      brokers:  "id, name",
+      accounts: "id, kind, brokerId, name",
+      pockets:  "id, name",
+      bondReferences: "isin, type, currency, maturityDate",
+      lots: "id, isin, accountId, pocketId, purchaseDate, closedAt, [accountId+isin], [pocketId+isin]",
+      couponPayments: "id, lotId, scheduledDate, status, [lotId+scheduledDate]",
+      cashTransactions: "id, accountId, pocketId, date, kind, currency, [accountId+date], [accountId+currency], [pocketId+date], [refId+refType]",
+      snapshots: "date",
+    }).upgrade(async tx => {
+      const accounts = await tx.table("accounts").toArray();
+      const moved = planHoldingsByPocket({
+        accounts,
+        pockets: await tx.table("pockets").toArray(),
+        cashTransactions: await tx.table("cashTransactions").toArray(),
+      });
+      if (moved.length) await tx.table("accounts").bulkPut(moved);
+    });
   }
+}
+
+/**
+ * Переносить залишок монет із рахунку в кишені.
+ *
+ * Хто саме володіє наявними монетами, у старих даних прямо не записано —
+ * лишається відновити це з того, хто платив за купівлю крипти на цьому
+ * рахунку. Одноразова здогадка при міграції прийнятна; постійним правилом
+ * вона бути не може, бо ціна входу в різних сторін різна.
+ */
+export function planHoldingsByPocket({ accounts = [], pockets = [], cashTransactions = [] }) {
+  const fallback = pockets[0]?.id;
+  const out = [];
+
+  for (const acc of accounts) {
+    const holdings = acc.holdings;
+    if (!holdings || Object.keys(holdings).length === 0) continue;
+    if (acc.holdingsByPocket) continue;
+
+    const spend = new Map();
+    for (const t of cashTransactions) {
+      if (t.accountId !== acc.id || t.kind !== "crypto_buy" || !t.pocketId) continue;
+      spend.set(t.pocketId, (spend.get(t.pocketId) || 0) + Math.abs(Number(t.amount) || 0));
+    }
+    let total = 0;
+    for (const v of spend.values()) total += v;
+
+    const byPocket = {};
+    if (total > 0) {
+      for (const [pocketId, v] of spend) {
+        const share = v / total;
+        byPocket[pocketId] = Object.fromEntries(
+          Object.entries(holdings).map(([coin, amt]) =>
+            [coin, Math.round((Number(amt) || 0) * share * 1e8) / 1e8]));
+      }
+    } else if (fallback) {
+      byPocket[fallback] = { ...holdings };
+    }
+
+    out.push({ ...acc, holdingsByPocket: byPocket, holdings: undefined });
+  }
+  return out;
 }
 
 /**

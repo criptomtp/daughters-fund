@@ -4,7 +4,7 @@ import { useBonds } from "./hooks/useBonds.js";
 import { useLots } from "./hooks/useLots.js";
 import { useCoupons } from "./hooks/useCoupons.js";
 import { useCashBalance } from "./hooks/useTransactions.js";
-import { accruedFromSchedule, groupCouponEvents } from "./calculations.js";
+import { accruedFromSchedule, groupCouponEvents, pocketCoins } from "./calculations.js";
 import { transactions as txRepo, lots as lotsRepo, coupons as couponsRepo } from "./repository.js";
 import { coinPriceUAH, COINS } from "./useMarket.js";
 
@@ -223,7 +223,7 @@ function BuyForm({ onDone, market, pocketId }) {
               value={coinAmount} onChange={e => setCoinAmount(e.target.value)} placeholder="0.00185" />
           </div>
           <span className="big-hint">
-            зараз у залишку {Number(account?.holdings?.[coin] || 0).toFixed(8)} {coin}
+            зараз у цій кишені {Number(pocketCoins(account, pocketId)[coin] || 0).toFixed(8)} {coin}
           </span>
         </label>
       )}
@@ -247,7 +247,7 @@ function BuyForm({ onDone, market, pocketId }) {
               <div className="calc-line">
                 на біржу заходить <strong>${depRaw.toFixed(2)}</strong> ({money(dep, "UAH")})
                 {coins > 0 && <> · залишок стане{" "}
-                  <strong>{(Number(account?.holdings?.[coin] || 0) + coins).toFixed(8)} {coin}</strong></>}
+                  <strong>{(Number(pocketCoins(account, pocketId)[coin] || 0) + coins).toFixed(8)} {coin}</strong></>}
               </div>
               {coins > 0 && coinPrice && (
                 <div className="calc-sub">

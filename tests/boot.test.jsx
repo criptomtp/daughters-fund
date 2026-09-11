@@ -56,7 +56,8 @@ describe("біржовий рахунок ведеться монетами, н�
     });
 
     const after = await accounts.get(acc.id);
-    expect(after.holdings.BTC).toBeCloseTo(0.00185, 8);
+    // Монети лягають у кишеню платника, а не в спільне число на рахунку.
+    expect(after.holdingsByPocket[pk.id].BTC).toBeCloseTo(0.00185, 8);
 
     const bal = await transactions.balanceByCurrency(acc.id);
     expect(bal.UAH ?? 0).toBeCloseTo(0, 2);   // завели й одразу перевели в монети
@@ -375,5 +376,50 @@ describe("поділ лоту між кишенями", () => {
     const old = await lots.get(lot.id);
 
     expect(lotInvested(old) + lotInvested(newLot)).toBeCloseTo(wholeInvested, 2);
+  });
+});
+
+describe("простори не бачать чужого", () => {
+  it("купони чужої кишені не потрапляють у підсумок", async () => {
+    const { accountSummary } = await import("../src/portfolio/calculations.js");
+    // Лоти порожні — це простір, де своїх паперів ще немає. Купони по чужих
+    // лотах передані повним списком, як їх і віддає база.
+    const s = accountSummary({
+      lots: [],
+      bondsByIsin: new Map([["X", { currency: "UAH", faceValue: 1000 }]]),
+      coupons: [
+        { lotId: "чужий", status: "received", actualDate: "2026-06-18", actualAmount: 3313.71 },
+        { lotId: "чужий", status: "scheduled", scheduledDate: "2026-12-18", amountNet: 500 },
+      ],
+      asOfDate: "2026-09-11T00:00:00.000Z",
+    });
+    expect(s.receivedYTD).toBe(0);
+    expect(s.scheduledNext12m).toBe(0);
+  });
+
+  it("купони закритого лоту лишаються в підсумку", async () => {
+    const { accountSummary } = await import("../src/portfolio/calculations.js");
+    const s = accountSummary({
+      lots: [{ id: "l1", isin: "X", quantity: 5, purchasePrice: 1000, closedAt: "2026-07-01" }],
+      bondsByIsin: new Map([["X", { currency: "UAH", faceValue: 1000 }]]),
+      coupons: [{ lotId: "l1", status: "received", actualDate: "2026-06-18", actualAmount: 437 }],
+      asOfDate: "2026-09-11T00:00:00.000Z",
+    });
+    expect(s.receivedYTD).toBeCloseTo(437, 2);   // папір погашено, гроші отримані
+  });
+
+  it("монети рахуються тій кишені, що їх купила", async () => {
+    const { extraByPocketFrom, pocketCoins, accountCoins } =
+      await import("../src/portfolio/calculations.js");
+    const acc = {
+      id: "wb", kind: "exchange",
+      holdingsByPocket: { kids: { BTC: 0.02 }, mine: { BTC: 0.005 } },
+    };
+    expect(pocketCoins(acc, "kids").BTC).toBe(0.02);
+    expect(accountCoins(acc).BTC).toBeCloseTo(0.025, 8);
+
+    const v = extraByPocketFrom({ accounts: [acc], priceOf: () => 4000000 });
+    expect(v.get("kids")).toBeCloseTo(80000, 2);
+    expect(v.get("mine")).toBeCloseTo(20000, 2);
   });
 });

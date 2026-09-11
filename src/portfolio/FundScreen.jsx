@@ -5,11 +5,11 @@ import { useBonds } from "./hooks/useBonds.js";
 import { useCoupons } from "./hooks/useCoupons.js";
 import { useAccounts } from "./hooks/useAccounts.js";
 import { usePersons } from "./hooks/usePersons.js";
-import { useTransactions, useCashBalance } from "./hooks/useTransactions.js";
+import { useTransactions } from "./hooks/useTransactions.js";
 import {
   accountSummary, portfolioXIRR, groupCouponEvents, nextCouponEvent,
   ageInYears, personShareValue, lotCurrentValue,
-  cashByPocketFrom, extraByPocketFrom, pocketShare,
+  cashByPocketFrom, extraByPocketFrom, pocketShare, pocketCoins, accountCoins,
 } from "./calculations.js";
 import { coinPriceUAH } from "./useMarket.js";
 
@@ -79,22 +79,11 @@ export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices
   // а не як послідовність угод — переоцінюємо за поточним курсом.
   const cryptoAccounts = accounts.filter(a => a.kind === "exchange");
   const cryptoIds = new Set(cryptoAccounts.map(a => a.id));
-  const cryptoFullByAccount = new Map(cryptoAccounts.map(a => [
-    a.id,
-    Object.entries(a.holdings || {}).reduce((s, [ticker, amount]) => {
-      const p = coinPriceUAH(ticker, market);
-      return s + (p ? p * (Number(amount) || 0) : 0);
-    }, 0),
-  ]));
-  // Монети лежать на рахунку одним числом. Частку простору беремо з того,
-  // скільки він витратив на купівлю крипти саме тут — рахується по ПОВНОМУ
-  // списку операцій, інакше пропорція втратить знаменник.
-  const extraByPocket = extraByPocketFrom({
-    accounts: cryptoAccounts, txs: allTxs, valueByAccountId: cryptoFullByAccount,
-  });
+  const priceOf = (ticker) => coinPriceUAH(ticker, market) || 0;
+  const extraByPocket = extraByPocketFrom({ accounts: cryptoAccounts, priceOf });
   const cryptoValue = pocketId
     ? (extraByPocket.get(pocketId) || 0)
-    : [...cryptoFullByAccount.values()].reduce((s, v) => s + v, 0);
+    : [...extraByPocket.values()].reduce((s, v) => s + v, 0);
   const cryptoInvested = txs
     .filter(t => t.kind === "deposit" && cryptoIds.has(t.accountId))
     .reduce((s, t) => s + (Number(t.amount) || 0), 0);
@@ -108,6 +97,25 @@ export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices
   const members = pocket
     ? persons.filter(p => pocketShare(pocket, p.id) > 0)
     : persons.filter(p => p.type === "child");
+
+  // Вартість рахунку рахуємо тут, а не всередині рядка: лише тут відомо,
+  // який простір відкрито. Рядок, що сам тягнув баланс рахунку й залишок
+  // монет, показував у кишені «Я» чужі гроші — на рахунку доньок стояло
+  // 9 ₴ готівки, а на біржі всі монети, хоча жодна з них не твоя.
+  const accountRows = accounts.map(account => {
+    const isCrypto = account.kind === "exchange";
+    const coins = pocketId ? pocketCoins(account, pocketId) : accountCoins(account);
+    const cashHere = txs
+      .filter(t => t.accountId === account.id && (t.currency || "UAH") === "UAH")
+      .reduce((s, t) => s + (Number(t.amount) || 0), 0);
+    const value = isCrypto
+      ? Object.entries(coins).reduce((s, [c, amt]) => s + priceOf(c) * (Number(amt) || 0), 0)
+      : lots.filter(l => l.accountId === account.id).reduce((s, l) => {
+          const b = bondsByIsin.get(l.isin);
+          return s + (b ? lotCurrentValue(b, l, now) : 0);
+        }, 0) + cashHere;
+    return { account, isCrypto, value };
+  }).filter(r => Math.abs(r.value) > 0.005);
 
   const bondsValue = summary.byCurrency.UAH?.currentValue || 0;
   const cash = txs
@@ -227,7 +235,7 @@ export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices
           </div>
         ) : (
           <div className="tile">
-            <span className="tile-label">Отримано купонів</span>
+            <span className="tile-label">Купонів за {new Date().getFullYear()} рік</span>
             <span className="tile-value">{money(summary.receivedYTD)}</span>
           </div>
         )}
@@ -258,33 +266,18 @@ export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices
 
       <section className="accounts-brief">
         <span className="strip-label">Рахунки</span>
-        {accounts.map(a => <AccountRow key={a.id} account={a} lots={lots} bondsByIsin={bondsByIsin} market={market} onOpen={() => onOpenDetails("accounts")} />)}
+        {accountRows.length === 0 && (
+          <p className="sheet-empty">У цьому просторі ще нічого немає.</p>
+        )}
+        {accountRows.map(r => (
+          <button key={r.account.id} className="account-row" onClick={() => onOpenDetails("accounts")}>
+            <span className="dot" style={{ background: r.account.color || "#c9a96a" }} />
+            <span className="account-name">{r.account.name}</span>
+            <span className="account-kind">{r.isCrypto ? "крипта" : "облігації"}</span>
+            <span className="account-value">{money(r.value)}</span>
+          </button>
+        ))}
       </section>
     </div>
-  );
-}
-
-function AccountRow({ account, lots, bondsByIsin, market, onOpen }) {
-  const balances = useCashBalance(account.id);
-  const isCrypto = account.kind === "exchange";
-  const value = isCrypto
-    ? Object.entries(account.holdings || {}).reduce((s, [t, amt]) => {
-        const p = coinPriceUAH(t, market);
-        return s + (p ? p * (Number(amt) || 0) : 0);
-      }, 0)
-    // Поточна вартість, а не номінал: рядок рахунку має показувати те саме,
-    // що й головне число зверху, інакше під схожими підписами стоять різні суми.
-    : lots.filter(l => l.accountId === account.id).reduce((s, l) => {
-        const b = bondsByIsin.get(l.isin);
-        return s + (b ? lotCurrentValue(b, l, new Date().toISOString()) : 0);
-      }, 0) + (balances.UAH || 0);
-
-  return (
-    <button className="account-row" onClick={onOpen}>
-      <span className="dot" style={{ background: account.color || "#c9a96a" }} />
-      <span className="account-name">{account.name}</span>
-      <span className="account-kind">{isCrypto ? "крипта" : "облігації"}</span>
-      <span className="account-value">{money(value)}</span>
-    </button>
   );
 }

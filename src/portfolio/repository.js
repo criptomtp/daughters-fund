@@ -217,7 +217,8 @@ export const accounts = {
       primaryCurrency: data.primaryCurrency || "UAH",
       // Біржовий рахунок (kind "exchange") ведеться інакше: угод не пишемо,
       // тримаємо поточні залишки монет як факт і переоцінюємо за курсом.
-      holdings: data.holdings && typeof data.holdings === "object" ? { ...data.holdings } : null,
+      holdingsByPocket: data.holdingsByPocket && typeof data.holdingsByPocket === "object"
+        ? { ...data.holdingsByPocket } : null,
       holdingsAt: data.holdingsAt || null,
       closedAt: null,
       createdAt: data.createdAt || now(),
@@ -472,10 +473,16 @@ export const transactions = {
       }
       if (coins > 0) {
         const fresh = await db.accounts.get(accountId);
-        const holdings = { ...(fresh.holdings || {}) };
+        // Монети лягають у кишеню того, хто платив. Раніше вони просто
+        // додавались до спільного числа на рахунку, і власника доводилось
+        // відновлювати пропорцією витрат — здогадкою, яка помиляється, коли
+        // сторони заходили за різною ціною.
+        const byPocket = { ...(fresh.holdingsByPocket || {}) };
+        const mine = { ...(byPocket[pocketId] || {}) };
         // Округлюємо до 8 знаків — точність сатоші, далі йде шум float
-        holdings[t] = Math.round(((Number(holdings[t]) || 0) + coins) * 1e8) / 1e8;
-        await db.accounts.put({ ...fresh, holdings, holdingsAt: isoDate(date) || now() });
+        mine[t] = Math.round(((Number(mine[t]) || 0) + coins) * 1e8) / 1e8;
+        byPocket[pocketId] = mine;
+        await db.accounts.put({ ...fresh, holdingsByPocket: byPocket, holdingsAt: isoDate(date) || now() });
       }
     });
   },
