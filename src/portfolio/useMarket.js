@@ -8,7 +8,6 @@ import { useCallback, useEffect, useState } from "react";
 // (обидва вже прописані в connect-src у index.html).
 
 const STORAGE_KEY = "df_market";
-const FX_LEGACY_KEY = "df_fx_rates";   // читає GoalsPanel — формат «одиниць за EUR»
 const REFRESH_MS = 60 * 60 * 1000;
 
 const FALLBACK = {
@@ -81,10 +80,6 @@ export function useMarket() {
       };
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-        // Сумісність: GoalsPanel досі читає курси у форматі «одиниць за EUR»
-        localStorage.setItem(FX_LEGACY_KEY, JSON.stringify({
-          UAH: next.uahPerEUR, USD: next.usdPerEUR, EUR: 1,
-        }));
       } catch { /* квота — не критично */ }
       return next;
     });
