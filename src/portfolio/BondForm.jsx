@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { BOND_TYPES, CURRENCIES, COUPON_FREQUENCIES, taxRateLabel } from "./taxRules.js";
 import { generateCouponSchedule, xirr } from "./calculations.js";
+import { lookupBond } from "./nbuRegistry.js";
 import { Modal } from "./Modal.jsx";
 
 const TYPE_LABELS = { ovdp: "ОВДП", corporate: "Корпоративна" };
@@ -56,6 +57,34 @@ export function BondForm({ initial, isNew, onSubmit, onCancel, asModal = true })
   }));
 
   const upd = (k, v) => setDraft(d => ({ ...d, [k]: v }));
+
+  // Автозаповнення з відкритого реєстру НБУ: номінал, купон, дати і — головне —
+  // точний графік виплат, який інакше довелося б вбивати руками по 7-8 рядків.
+  const [nbu, setNbu] = useState({ loading: false, error: null, ok: null });
+  const pullFromNbu = async () => {
+    setNbu({ loading: true, error: null, ok: null });
+    try {
+      const found = await lookupBond(draft.isin);
+      if (!found) {
+        setNbu({ loading: false, ok: null, error: `ISIN ${draft.isin} у реєстрі НБУ не знайдено. Перевір код або введи умови вручну.` });
+        return;
+      }
+      // Своє не затираємо: ручний тікер і нотатки лишаються, якщо вже введені.
+      setDraft(d => ({
+        ...found,
+        ticker: d.ticker || found.ticker,
+        notes: d.notes || found.notes,
+      }));
+      if (Array.isArray(found.customSchedule) && found.customSchedule.length > 0) setMode("manual");
+      setNbu({
+        loading: false,
+        error: null,
+        ok: `купон ${found.couponRate}%, погашення ${found.maturityDate}, виплат у графіку — ${found.customSchedule?.length || 0}`,
+      });
+    } catch (e) {
+      setNbu({ loading: false, ok: null, error: e.message || "Не вдалося завантажити реєстр НБУ." });
+    }
+  };
 
   // DropStab-style 2-of-3 auto-fill
   const round2 = (n) => Math.round(n * 100) / 100;
@@ -207,14 +236,29 @@ export function BondForm({ initial, isNew, onSubmit, onCancel, asModal = true })
 
       <div className="form-grid">
         <Field label="ISIN" required>
-          <input
-            className="form-input mono"
-            value={draft.isin}
-            onChange={e => upd("isin", e.target.value.toUpperCase())}
-            maxLength={12}
-            disabled={!isNew}
-            placeholder="UA4000XXXXXX"
-          />
+          <div className="isin-select-row">
+            <input
+              className="form-input mono"
+              value={draft.isin}
+              onChange={e => upd("isin", e.target.value.toUpperCase())}
+              maxLength={12}
+              disabled={!isNew}
+              placeholder="UA4000XXXXXX"
+            />
+            {isNew && (
+              <button
+                type="button"
+                className="owner-action-btn"
+                onClick={pullFromNbu}
+                disabled={draft.isin.length !== 12 || nbu.loading}
+                title="Підтягнути номінал, купон, дати і повний графік виплат з реєстру НБУ"
+              >
+                {nbu.loading ? "Тягну…" : "↓ З реєстру НБУ"}
+              </button>
+            )}
+          </div>
+          {nbu.error && <span className="form-error">{nbu.error}</span>}
+          {nbu.ok && <span className="form-ok">✓ Заповнено з НБУ: {nbu.ok}</span>}
         </Field>
         <Field label="Тікер (опц.)">
           <input className="form-input" value={draft.ticker} onChange={e => upd("ticker", e.target.value)} placeholder="напр. ОВДП-2027-04" />

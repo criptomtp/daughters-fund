@@ -5,7 +5,7 @@ import { usePersons } from "./hooks/usePersons.js";
 import { useAccounts } from "./hooks/useAccounts.js";
 import { useLots } from "./hooks/useLots.js";
 import { useBonds } from "./hooks/useBonds.js";
-import { goalProgress, ageInYears } from "./calculations.js";
+import { goalProgress, ageInYears, avgMonthlyDeposits } from "./calculations.js";
 
 const CURRENCY_SYMBOL = { UAH: "₴", USD: "$", EUR: "€" };
 function fmt(n, cur = "UAH") {
@@ -21,7 +21,7 @@ export function GoalsPanel() {
   const { list: lots } = useLots();
   const { list: bonds } = useBonds();
 
-  const cashByAccountRaw = useLiveQuery(async () => {
+  const cashTx = useLiveQuery(async () => {
     const all = await db.cashTransactions.toArray();
     const map = new Map();
     for (const t of all) {
@@ -30,8 +30,9 @@ export function GoalsPanel() {
       const cur = t.currency || "UAH";
       m[cur] = (m[cur] || 0) + (Number(t.amount) || 0);
     }
-    return map;
+    return { map, all };
   }, []);
+  const cashByAccountRaw = cashTx?.map;
 
   const bondsByIsin = useMemo(() => new Map(bonds.map(b => [b.isin, b])), [bonds]);
 
@@ -56,6 +57,22 @@ export function GoalsPanel() {
       .filter(Boolean);
   }, [persons, accounts, lots, bondsByIsin, cashByAccountRaw, fxRates]);
 
+  // План/факт: фактичний середній внесок за 6 міс проти суми requiredMonthly
+  // всіх цілей у тій самій валюті — головний сигнал «встигаємо чи ні».
+  const pace = useMemo(() => {
+    const all = cashTx?.all || [];
+    const byCur = new Map();
+    for (const g of goals) {
+      if (!(g.requiredMonthly > 0)) continue;
+      byCur.set(g.currency, (byCur.get(g.currency) || 0) + g.requiredMonthly);
+    }
+    return Array.from(byCur.entries()).map(([cur, plan]) => ({
+      cur,
+      plan,
+      fact: avgMonthlyDeposits({ transactions: all, currency: cur, months: 6 }),
+    }));
+  }, [goals, cashTx]);
+
   if (goals.length === 0) return null;
 
   return (
@@ -66,6 +83,19 @@ export function GoalsPanel() {
           <GoalCard key={g.person.id} goal={g} />
         ))}
       </div>
+      {pace.length > 0 && (
+        <div className="goals-pace">
+          {pace.map(({ cur, plan, fact }) => (
+            <div key={cur} className={`goals-pace-row ${fact >= plan ? "ok" : "lag"}`}>
+              <span className="goals-pace-label">Темп внесків (факт за 6 міс vs план)</span>
+              <strong>{fmt(fact, cur)}/міс</strong>
+              <span className="goals-pace-sep">з потрібних</span>
+              <strong>{fmt(plan, cur)}/міс</strong>
+              <span className="goals-pace-verdict">{fact >= plan ? "✓ встигаємо" : `△ відстаємо на ${fmt(plan - fact, cur)}/міс`}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

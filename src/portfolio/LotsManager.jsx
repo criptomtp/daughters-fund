@@ -305,6 +305,16 @@ function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCrea
   const availableCash = balances[cur] || 0;
   const willBeShort = bond && total > 0 && availableCash < total;
 
+  // «Маю на рахунку N — скільки штук влізе?». Облігації продаються цілими штуками,
+  // тож рахуємо від брудної ціни (clean + НКД) і не забуваємо комісію брокера.
+  const commissionAmt = Number(draft.commission || 0);
+  const maxAffordable = dirtyPerPiece > 0
+    ? Math.max(0, Math.floor((availableCash - commissionAmt) / dirtyPerPiece))
+    : 0;
+  const leftoverAtMax = maxAffordable > 0
+    ? availableCash - commissionAmt - maxAffordable * dirtyPerPiece
+    : 0;
+
   const handleTopUp = async (payload) => {
     try {
       if (topUpMode === "deposit")      await txRepo.deposit(payload);
@@ -404,6 +414,17 @@ function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCrea
             <input type="number" step="1" min="1" className="form-input"
               value={draft.quantity}
               onChange={e => upd("quantity", Number(e.target.value))} />
+            {maxAffordable > 0 && (
+              <button
+                type="button"
+                className="btn-max"
+                onClick={() => upd("quantity", maxAffordable)}
+                disabled={draft.quantity === maxAffordable}
+              >
+                Максимум на {fmt(availableCash, cur)} → {maxAffordable} шт
+                {leftoverAtMax > 0 && <span className="form-hint"> (залишиться {fmt(leftoverAtMax, cur)})</span>}
+              </button>
+            )}
           </label>
           <label className="form-field">
             <span className="form-label">

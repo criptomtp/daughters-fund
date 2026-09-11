@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useCoupons } from "./hooks/useCoupons.js";
 import { useLots } from "./hooks/useLots.js";
 import { useAccounts } from "./hooks/useAccounts.js";
@@ -35,15 +35,18 @@ export function HeroTile({ accountFilter, onMarkReceived }) {
   const nextBond = next?.lot && bondsByIsin.get(next.lot.isin);
   const nextCur = nextBond?.currency || "UAH";
 
+  const [opErr, setOpErr] = useState(null);
   const handleMarkReceived = async (id) => {
+    setOpErr(null);
     try { await markReceived(id, {}); onMarkReceived?.(); }
-    catch (e) { console.error(e); }
+    catch (e) { setOpErr(e.message); }   // show the failure — silent console.error meant "looks recorded, isn't"
   };
 
-  if (!next && overdue.length === 0) return null;
+  if (!next && overdue.length === 0 && !opErr) return null;
 
   return (
     <div className="hero-tile">
+      {opErr && <div className="portfolio-error">⚠ Не вдалося позначити: {opErr}</div>}
       {next && (
         <div className="hero-next">
           <span className="hero-icon">🔔</span>

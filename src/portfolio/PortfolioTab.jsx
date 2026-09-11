@@ -1,4 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { runAutoBackup } from "./autoBackup.js";
+import { backup } from "./repository.js";
 import { useAccounts } from "./hooks/useAccounts.js";
 import { usePersons } from "./hooks/usePersons.js";
 import { useBrokers } from "./hooks/useBrokers.js";
@@ -8,6 +10,7 @@ import { AccountsManager } from "./AccountsManager.jsx";
 import { BondsManager } from "./BondsManager.jsx";
 import { LotsManager } from "./LotsManager.jsx";
 import { CouponCalendar } from "./CouponCalendar.jsx";
+import { QuickEntry } from "./QuickEntry.jsx";
 import { AccountDashboard } from "./AccountDashboard.jsx";
 import { TransactionsPanel } from "./TransactionsPanel.jsx";
 import { BackupPanel } from "./BackupPanel.jsx";
@@ -25,6 +28,17 @@ export function PortfolioTab() {
 
   const brokersById = useMemo(() => new Map(brokers.map(b => [b.id, b])), [brokers]);
   const isEmpty = lots.length === 0 && accounts.length === 0;
+
+  // Тихий авто-бекап (якщо підключений файл): на відкритті, кожні 10 хв
+  // і коли вкладка ховається. Помилки не турбують — статус видно в BackupPanel.
+  useEffect(() => {
+    const run = () => { runAutoBackup(() => backup.exportAll()).catch(() => {}); };
+    run();
+    const id = setInterval(run, 10 * 60 * 1000);
+    const onVis = () => { if (document.visibilityState === "hidden") run(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
 
   const filterOptions = useMemo(() => {
     return [
@@ -59,6 +73,10 @@ export function PortfolioTab() {
           </button>
         ))}
       </div>
+
+      {/* Списки оновлюються самі через useLiveQuery — remount тут не потрібен,
+          він би лише згорнув форму і стер підтвердження про запис. */}
+      <QuickEntry />
 
       <AccountDashboard accountFilter={accountFilter} accounts={accounts} persons={persons} />
 

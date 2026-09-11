@@ -10,6 +10,10 @@ export const TAX_RULES = {
   },
   corporate: {
     coupon:           { pdfo: 0.18, militaryTax: 0.05 },
+    // NOT WIRED: applyTax наразі викликається лише з payoutType="coupon"
+    // (calculations.js). Оподаткування інвестприбутку дисконт→номінал при
+    // погашенні корпоративних — відкрите питання, потребує податкової
+    // консультації перед підключенням (ПКУ ст.170.2).
     redemption:       { pdfo: 0,    militaryTax: 0    },
     secondaryMarket:  { pdfo: 0.18, militaryTax: 0.05 },
   },

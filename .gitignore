@@ -32,3 +32,4 @@ dist-ssr
 .claude-flow/
 .swarm/
 .mcp.json
+.vercel

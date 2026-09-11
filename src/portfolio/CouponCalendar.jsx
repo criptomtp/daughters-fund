@@ -4,7 +4,7 @@ import { useLots } from "./hooks/useLots.js";
 import { useBonds } from "./hooks/useBonds.js";
 import { useAccounts } from "./hooks/useAccounts.js";
 import { usePersons } from "./hooks/usePersons.js";
-import { groupCouponsByMonth } from "./calculations.js";
+import { groupCouponsByMonth, beneficiaryShare } from "./calculations.js";
 import { MarkReceivedModal } from "./MarkReceivedModal.jsx";
 
 const MONTH_NAMES = [
@@ -27,7 +27,9 @@ export function CouponCalendar({ accountFilter }) {
     return () => clearInterval(id);
   }, []);
 
-  const fromIso = useMemo(() => now.toISOString(), [now]);
+  // Date-only lower bound so a coupon due TODAY stays in the calendar all day
+  // (full datetime would lexicographically exclude it from >= comparisons).
+  const fromIso = useMemo(() => now.toISOString().slice(0, 10), [now]);
   const yearAhead = useMemo(() => {
     const d = new Date(now);
     d.setFullYear(d.getFullYear() + 1);
@@ -45,6 +47,7 @@ export function CouponCalendar({ accountFilter }) {
   const { list: persons } = usePersons();
 
   const [confirmingCoupon, setConfirmingCoupon] = useState(null);
+  const [opErr, setOpErr] = useState(null);
 
   const lotsById     = useMemo(() => new Map(lots.map(l => [l.id, l])), [lots]);
   const bondsByIsin  = useMemo(() => new Map(bonds.map(b => [b.isin, b])), [bonds]);
@@ -55,8 +58,16 @@ export function CouponCalendar({ accountFilter }) {
 
   const handleConfirm = async (payload) => {
     if (!confirmingCoupon) return;
+    setOpErr(null);
     try { await markReceived(confirmingCoupon.id, payload); }
+    catch (e) { setOpErr(e.message); }   // a swallowed error here = user thinks the money was recorded
     finally { setConfirmingCoupon(null); }
+  };
+
+  const handleUnmark = async (id) => {
+    setOpErr(null);
+    try { await markScheduled(id); }
+    catch (e) { setOpErr(e.message); }
   };
 
   if (loading) return <div className="portfolio-loading">Завантаження…</div>;
@@ -67,6 +78,7 @@ export function CouponCalendar({ accountFilter }) {
 
   return (
     <div className="coupon-calendar">
+      {opErr && <div className="portfolio-error">⚠ {opErr}</div>}
       {confirmingCoupon && (() => {
         const lot = lotsById.get(confirmingCoupon.lotId);
         const bond = lot && bondsByIsin.get(lot.isin);
@@ -130,7 +142,7 @@ export function CouponCalendar({ accountFilter }) {
                         <span className="cal-share">
                           {" → "}{beneficiaries.map((p, i) => (
                             <span key={p.id} style={{ color: p.color }}>
-                              {i > 0 && " · "}{p.name} {fmt((c.amountNet || 0) / beneficiaries.length, bond?.currency)}
+                              {i > 0 && " · "}{p.name} {fmt((c.amountNet || 0) * beneficiaryShare(account, p.id), bond?.currency)}
                             </span>
                           ))}
                         </span>
@@ -139,7 +151,7 @@ export function CouponCalendar({ accountFilter }) {
                     <span className="cal-isin mono">{lot?.isin}</span>
                     <span className="cal-amount">{fmt(c.amountNet, bond?.currency)}</span>
                     {isReceived ? (
-                      <button className="owner-action-btn" onClick={() => markScheduled(c.id)} title="Скасувати позначку">✓</button>
+                      <button className="owner-action-btn" onClick={() => handleUnmark(c.id)} title="Скасувати позначку">✓</button>
                     ) : (
                       <button className="owner-action-btn ok" onClick={() => setConfirmingCoupon(c)} title="Позначити отриманим (з можливістю вказати реальну суму)">Отримано</button>
                     )}

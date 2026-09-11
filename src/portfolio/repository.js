@@ -1,5 +1,10 @@
 import { db, SCHEMA_VERSION } from "./db.js";
 import { generateCouponSchedule, lotInvested } from "./calculations.js";
+// Статичний імпорт навмисне: динамічний `await import()` створював окремий чанк,
+// і на встановленому PWA зі старим service worker він не завантажувався —
+// імпорт бекапу падав з «Importing a module script failed». Файл маленький,
+// економія на розділенні бандла не варта такого класу помилок.
+import { migrateBackup } from "./migrations.js";
 
 // ── Utils ───────────────────────────────────────────────────────────────────
 
@@ -120,10 +125,16 @@ export const accounts = {
     if (!data.brokerId) throw new Error("Брокер обов'язковий");
 
     const kind = data.kind || "shared";
-    if (kind === "shared" && (!data.beneficiaryIds || data.beneficiaryIds.length < 2)) {
+    // Перевірка стосується будь-якого типу, включно з біржовим: рахунок без
+    // бенефіціарів дає кожному частку нуль, і його активи тихо випадають із
+    // підрахунку — цифри лишаються правдоподібними, просто меншими.
+    if (!data.beneficiaryIds || data.beneficiaryIds.length === 0) {
+      throw new Error("Рахунок потребує щонайменше 1 бенефіціара");
+    }
+    if (kind === "shared" && data.beneficiaryIds.length < 2) {
       throw new Error("Спільний рахунок потребує щонайменше 2 бенефіціарів");
     }
-    if (kind === "personal" && (!data.beneficiaryIds || data.beneficiaryIds.length !== 1)) {
+    if (kind === "personal" && data.beneficiaryIds.length !== 1) {
       throw new Error("Персональний рахунок має рівно 1 бенефіціара");
     }
 
@@ -139,6 +150,10 @@ export const accounts = {
       color: data.color || "#c9a96a",
       emoji: data.emoji || (kind === "shared" ? "👨‍👩‍👧" : "👤"),
       primaryCurrency: data.primaryCurrency || "UAH",
+      // Біржовий рахунок (kind "exchange") ведеться інакше: угод не пишемо,
+      // тримаємо поточні залишки монет як факт і переоцінюємо за курсом.
+      holdings: data.holdings && typeof data.holdings === "object" ? { ...data.holdings } : null,
+      holdingsAt: data.holdingsAt || null,
       closedAt: null,
       createdAt: data.createdAt || now(),
     };
@@ -151,6 +166,9 @@ export const accounts = {
     if (!existing) throw new Error("Рахунок не знайдено");
     if (existing.kind === "personal" && patch.kind && patch.kind !== "personal") {
       throw new Error("Тип персонального рахунку не можна змінити");
+    }
+    if (patch.beneficiaryIds && patch.beneficiaryIds.length === 0) {
+      throw new Error("Рахунок потребує щонайменше 1 бенефіціара");
     }
     if (patch.beneficiaryIds && existing.kind === "shared" && patch.beneficiaryIds.length < 2) {
       throw new Error("Спільний рахунок потребує щонайменше 2 бенефіціарів");
@@ -273,7 +291,12 @@ export const CASH_KINDS = {
   withdrawal:      { label: "Зняття",            sign: -1 },
   lot_purchase:    { label: "Купівля облігації", sign: -1 },
   lot_redemption:  { label: "Погашення",         sign: +1 },
+  lot_sale:        { label: "Продаж",            sign: +1 },
   coupon_received: { label: "Купон",             sign: +1 },
+  // Гроші не пішли з портфеля — вони перетворились на монети, вартість яких
+  // рахується з залишку на біржовому рахунку. Тому це не "зняття": у дохідність
+  // як відтік власника не потрапляє.
+  crypto_buy:      { label: "Купівля крипти",    sign: -1 },
   transfer_out:    { label: "Переказ (вихід)",   sign: -1 },
   transfer_in:     { label: "Переказ (вхід)",    sign: +1 },
   fee:             { label: "Комісія",           sign: -1 },
@@ -339,6 +362,47 @@ export const transactions = {
     return await transactions._addRaw({
       accountId, date, currency: currency || acc.primaryCurrency,
       amount: -amt, kind: "withdrawal", notes,
+    });
+  },
+
+  /**
+   * Купівля крипти на біржовому рахунку: гривня списується, монети додаються
+   * до залишку. Це не «зняття» — гроші не виходять із фонду, вони змінюють
+   * форму, тому окремий вид операції, який не рахується як відтік власника.
+   */
+  async cryptoBuy({ accountId, amount, ticker, coinAmount, currency, date, notes }) {
+    if (!accountId) throw new Error("Рахунок обов'язковий");
+    const acc = await db.accounts.get(accountId);
+    if (!acc) throw new Error("Рахунок не знайдено");
+    if (acc.kind !== "exchange") throw new Error("Це не біржовий рахунок");
+
+    const amt = Math.abs(Number(amount)) || 0;
+    const coins = Number(coinAmount) || 0;
+    if (amt <= 0 && coins <= 0) throw new Error("Вкажи суму або кількість монет");
+    const t = String(ticker || "").toUpperCase();
+    if (coins > 0 && !t) throw new Error("Вибери монету");
+
+    await db.transaction("rw", [db.cashTransactions, db.accounts], async () => {
+      if (amt > 0) {
+        const tx = await transactions._addRaw({
+          accountId, date, currency: currency || acc.primaryCurrency,
+          amount: -amt, kind: "crypto_buy",
+          notes: notes || (coins > 0 ? `Куплено ${coins} ${t}` : "Купівля крипти"),
+        });
+        // Кількість монет зберігаємо прямо в транзакції — тоді історія
+        // відновлюється точно, а не оцінкою за ціною дня.
+        if (coins > 0 && tx?.id) {
+          const saved = await db.cashTransactions.get(tx.id);
+          if (saved) await db.cashTransactions.put({ ...saved, coinTicker: t, coinAmount: coins });
+        }
+      }
+      if (coins > 0) {
+        const fresh = await db.accounts.get(accountId);
+        const holdings = { ...(fresh.holdings || {}) };
+        // Округлюємо до 8 знаків — точність сатоші, далі йде шум float
+        holdings[t] = Math.round(((Number(holdings[t]) || 0) + coins) * 1e8) / 1e8;
+        await db.accounts.put({ ...fresh, holdings, holdingsAt: isoDate(date) || now() });
+      }
     });
   },
 
@@ -505,6 +569,45 @@ export const lots = {
     });
 
     return lot;
+  },
+
+  /**
+   * Продаж лоту до погашення. Закриває позицію, зараховує виручку готівкою
+   * і знімає з розкладу всі майбутні виплати по ньому — папера більше немає,
+   * купони по ньому не прийдуть.
+   */
+  async sell(id, { date, amount, accountId, notes } = {}) {
+    const lot = await db.lots.get(id);
+    if (!lot) throw new Error("Лот не знайдено");
+    if (lot.closedAt) throw new Error("Лот уже закритий");
+    const proceeds = Math.abs(Number(amount));
+    if (!Number.isFinite(proceeds) || proceeds <= 0) throw new Error("Сума продажу має бути > 0");
+    const bond = await db.bondReferences.get(lot.isin);
+    const when = isoDate(date) || now();
+
+    await db.transaction("rw", [db.lots, db.cashTransactions, db.couponPayments], async () => {
+      await db.lots.put({ ...lot, closedAt: when, closedReason: "sale" });
+      await db.cashTransactions.add({
+        id: uid(),
+        accountId: accountId || lot.accountId,
+        date: when,
+        currency: bond?.currency || "UAH",
+        amount: proceeds,
+        kind: "lot_sale",
+        refId: lot.id,
+        refType: "lot",
+        notes: notes || `Продаж ${lot.quantity} × ${bond?.ticker || lot.isin}`,
+        createdAt: now(),
+      });
+      // Заплановані виплати після дати продажу більше не наші
+      const future = await db.couponPayments.where("lotId").equals(lot.id).toArray();
+      for (const c of future) {
+        if (c.status !== "received" && String(c.scheduledDate).slice(0, 10) > String(when).slice(0, 10)) {
+          await db.couponPayments.delete(c.id);
+        }
+      }
+    });
+    return { closedAt: when, proceeds };
   },
 
   async update(id, patch) {
@@ -680,7 +783,7 @@ export const coupons = {
     });
   },
 
-  async markReceived(id, { actualDate, actualAmount, notes } = {}) {
+  async markReceived(id, { actualDate, actualAmount, notes, accountId } = {}) {
     const c = await db.couponPayments.get(id);
     if (!c) throw new Error("Виплату не знайдено");
 
@@ -691,13 +794,21 @@ export const coupons = {
     const amt = actualAmount != null ? Number(actualAmount) : c.amountNet;
     const date = isoDate(actualDate) || now();
 
-    await db.transaction("rw", [db.couponPayments, db.cashTransactions], async () => {
+    await db.transaction("rw", [db.couponPayments, db.cashTransactions, db.lots], async () => {
       await db.couponPayments.put({
         ...c,
         status: "received",
         actualDate: date,
         actualAmount: amt,
       });
+
+      // Погашення закриває лот: тіло повернулось грошима, папера більше немає.
+      // Без цього він висів би в портфелі вічно — вартість рахується від
+      // номіналу, а номінал нікуди не дівається.
+      const isRedemption = c.kind === "redemption" || c.kind === "coupon+redemption";
+      if (isRedemption) {
+        await db.lots.put({ ...lot, closedAt: date, closedReason: "redemption" });
+      }
 
       // Видалити old tx якщо була (на випадок повторного marking)
       const oldTxs = await db.cashTransactions
@@ -711,7 +822,10 @@ export const coupons = {
           : "coupon_received";
         await db.cashTransactions.add({
           id: uid(),
-          accountId: lot.accountId,
+          // За замовчуванням гроші падають на рахунок, де лежить папір. Але
+          // емітент може перерахувати і кудись інде (у звіті ICU так сталося з
+          // погашенням — воно пішло на банківський рахунок), тому дозволяємо вказати.
+          accountId: accountId || lot.accountId,
           date,
           currency: bond.currency,
           amount: amt,
@@ -725,11 +839,58 @@ export const coupons = {
     });
   },
 
+  /**
+   * Позначає отриманою ЦІЛУ подію виплати — усі лотові записи одного випуску
+   * на одну дату. Емітент платить одним переказом, тому й підтвердження має
+   * бути одне. Фактична сума ділиться між записами пропорційно їхнім плановим
+   * сумам, а копійки округлення падають на останній, щоб сума частин дорівнювала
+   * тому, що реально надійшло.
+   */
+  async markGroupReceived(couponIds, { actualDate, actualAmount, accountId } = {}) {
+    const ids = [...new Set(couponIds || [])];
+    if (ids.length === 0) throw new Error("Порожня група виплат");
+
+    const rows = (await Promise.all(ids.map(id => db.couponPayments.get(id)))).filter(Boolean);
+    if (rows.length === 0) throw new Error("Виплати не знайдено");
+
+    const plannedTotal = rows.reduce((s, c) => s + (Number(c.amountNet) || 0), 0);
+    const total = actualAmount != null ? Number(actualAmount) : plannedTotal;
+
+    let allocated = 0;
+    const shares = rows.map((c, i) => {
+      if (i === rows.length - 1) return Math.round((total - allocated) * 100) / 100;
+      const share = plannedTotal > 0
+        ? Math.round((total * (Number(c.amountNet) || 0) / plannedTotal) * 100) / 100
+        : Math.round((total / rows.length) * 100) / 100;
+      allocated += share;
+      return share;
+    });
+
+    for (let i = 0; i < rows.length; i++) {
+      await this.markReceived(rows[i].id, { actualDate, actualAmount: shares[i], accountId });
+    }
+    return { count: rows.length, total };
+  },
+
+  /** Скасовує підтвердження цілої події — щоб перезаписати з правильною сумою. */
+  async markGroupScheduled(couponIds) {
+    for (const id of [...new Set(couponIds || [])]) {
+      await this.markScheduled(id).catch(() => {});
+    }
+  },
+
   async markScheduled(id) {
     const c = await db.couponPayments.get(id);
     if (!c) throw new Error("Виплату не знайдено");
-    await db.transaction("rw", [db.couponPayments, db.cashTransactions], async () => {
+    await db.transaction("rw", [db.couponPayments, db.cashTransactions, db.lots], async () => {
       await db.couponPayments.put({ ...c, status: "scheduled", actualDate: null, actualAmount: null });
+      // Скасували підтвердження погашення — лот повертається в портфель
+      if (c.kind === "redemption" || c.kind === "coupon+redemption") {
+        const lot = await db.lots.get(c.lotId);
+        if (lot?.closedReason === "redemption") {
+          await db.lots.put({ ...lot, closedAt: null, closedReason: null });
+        }
+      }
       const oldTxs = await db.cashTransactions
         .where("[refId+refType]").equals([id, "coupon"]).toArray();
       for (const t of oldTxs) await db.cashTransactions.delete(t.id);
@@ -751,9 +912,23 @@ export const backup = {
       db.cashTransactions.toArray(),
       db.snapshots.toArray(),
     ]);
+    // Device-local settings that live outside Dexie but must survive a restore
+    // on a fresh device (wallet addresses are NOT financial records, yet losing
+    // them on migration reads as data loss to the user).
+    let localSettings = null;
+    try {
+      if (typeof localStorage !== "undefined") {
+        localSettings = {
+          df_wallets:  localStorage.getItem("df_wallets")  || null,
+          df_fx_rates: localStorage.getItem("df_fx_rates") || null,
+        };
+      }
+    } catch { /* private mode etc. — skip */ }
+
     return {
       schemaVersion: SCHEMA_VERSION,
       exportedAt: now(),
+      localSettings,
       data: {
         persons: personsData,
         brokers: brokersData,
@@ -767,22 +942,22 @@ export const backup = {
     };
   },
 
-  async importAll(payload, { merge = false } = {}) {
+  // Завжди повна заміна (clear → bulkPut). Колишній merge-режим видалено:
+  // UI його ніколи не вмикав, а мовчазний upsert по ключах міг непомітно
+  // перезаписувати реальні записи з чужого файлу.
+  async importAll(payload) {
     if (!payload?.data) throw new Error("Невалідний файл бекапу");
-    const { migrateBackup } = await import("./migrations.js");
     const migrated = migrateBackup(payload);
     const { persons: p, brokers: br, accounts: a, bondReferences: b, lots: l, couponPayments: c, cashTransactions: t, snapshots: s } = migrated.data;
 
     await db.transaction("rw",
       [db.persons, db.brokers, db.accounts, db.bondReferences, db.lots, db.couponPayments, db.cashTransactions, db.snapshots],
       async () => {
-        if (!merge) {
-          await Promise.all([
-            db.persons.clear(), db.brokers.clear(), db.accounts.clear(),
-            db.bondReferences.clear(), db.lots.clear(),
-            db.couponPayments.clear(), db.cashTransactions.clear(), db.snapshots.clear(),
-          ]);
-        }
+        await Promise.all([
+          db.persons.clear(), db.brokers.clear(), db.accounts.clear(),
+          db.bondReferences.clear(), db.lots.clear(),
+          db.couponPayments.clear(), db.cashTransactions.clear(), db.snapshots.clear(),
+        ]);
         if (p?.length)  await db.persons.bulkPut(p);
         if (br?.length) await db.brokers.bulkPut(br);
         if (a?.length)  await db.accounts.bulkPut(a);
@@ -792,6 +967,15 @@ export const backup = {
         if (t?.length)  await db.cashTransactions.bulkPut(t);
         if (s?.length)  await db.snapshots.bulkPut(s);
       });
+
+    // Restore device-local settings (wallet addresses, FX rates) if present.
+    try {
+      if (typeof localStorage !== "undefined" && migrated.localSettings) {
+        const ls = migrated.localSettings;
+        if (typeof ls.df_wallets === "string")  localStorage.setItem("df_wallets", ls.df_wallets);
+        if (typeof ls.df_fx_rates === "string") localStorage.setItem("df_fx_rates", ls.df_fx_rates);
+      }
+    } catch { /* non-fatal */ }
   },
 };
 
@@ -800,9 +984,6 @@ export const backup = {
 import { lotCurrentValue } from "./calculations.js";
 
 export const snapshots = {
-  list: () => db.snapshots.orderBy("date").toArray(),
-  get:  (date) => db.snapshots.get(date),
-
   async takeNow() {
     const [lotsArr, bondsArr, txsArr] = await Promise.all([
       db.lots.toArray(),
@@ -842,10 +1023,6 @@ export const snapshots = {
     const existing = await db.snapshots.get(today);
     if (existing) return null;
     return await snapshots.takeNow();
-  },
-
-  async remove(date) {
-    await db.snapshots.delete(date);
   },
 };
 

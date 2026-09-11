@@ -1200,6 +1200,14 @@
   text-align: center;
   letter-spacing: 0.02em;
 }
+.persist-warning.danger {
+  background: rgba(184, 92, 92, 0.14);
+  border-bottom-color: rgba(184, 92, 92, 0.4);
+  color: #d98080;
+  line-height: 1.5;
+  padding: 10px 16px;
+}
+.persist-warning.danger strong { color: #e79a9a; }
 
 /* ── Backup stale warning ─────────────────────────────────────────────────── */
 
@@ -2890,3 +2898,235 @@
   gap: 10px;
 }
 .beneficiary-weight-row .form-input { max-width: 110px; }
+
+/* Goals: contribution pace (plan vs fact) */
+.goals-pace { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.goals-pace-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--rule-soft);
+}
+.goals-pace-row.ok  .goals-pace-verdict { color: var(--gain); }
+.goals-pace-row.lag .goals-pace-verdict { color: #e0a040; }
+.goals-pace-label { color: var(--ink-mute); }
+.goals-pace-sep { color: var(--ink-mute); }
+
+/* Auto-backup block */
+.backup-auto {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule-soft);
+}
+.backup-auto-head {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-bottom: 6px;
+}
+.backup-auto-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.backup-auto-btns { display: flex; gap: 8px; }
+
+/* ── Автозаповнення з реєстру НБУ + «максимум на готівку» ─────────────────── */
+
+.form-ok {
+  display: block;
+  margin-top: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--gain);
+  letter-spacing: 0.03em;
+}
+
+.btn-max {
+  display: block;
+  margin-top: 5px;
+  padding: 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  color: var(--brass);
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+.btn-max:hover:not(:disabled) { color: var(--brass-deep); text-decoration: underline; }
+.btn-max:disabled { color: var(--ink-faint); cursor: default; }
+.btn-max .form-hint { color: var(--ink-mute); }
+
+/* ── Швидкий запис: внесок + покупка в один екран ─────────────────────────── */
+
+.quick-entry {
+  border: 1px solid var(--brass-line);
+  border-radius: 3px;
+  background: var(--ink-700);
+  margin-bottom: 18px;
+  overflow: hidden;
+}
+
+.quick-entry-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--brass-glow);
+  border: 0;
+  cursor: pointer;
+  color: var(--brass);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: background 160ms ease;
+}
+.quick-entry-toggle:hover { background: var(--brass-line); }
+.quick-entry-toggle-chev { font-size: 11px; opacity: 0.7; }
+
+.quick-entry-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-top: 1px solid var(--rule);
+}
+
+.quick-entry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.quick-entry-grid .form-field--full { grid-column: 1 / -1; }
+
+.quick-entry-preview {
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  background: var(--ink-800);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.quick-entry-headline {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--paper);
+}
+.quick-entry-headline strong { color: var(--brass); }
+.quick-entry-detail,
+.quick-entry-hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-mute);
+}
+.quick-entry-warn {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--oxblood);
+}
+.quick-entry-done {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--gain);
+  background: var(--gain-soft);
+  border: 1px solid var(--gain-line);
+  border-radius: 2px;
+  padding: 10px 12px;
+}
+
+.quick-entry-submit {
+  padding: 13px 18px;
+  background: var(--brass);
+  color: var(--ink-900);
+  border: 0;
+  border-radius: 2px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 160ms ease;
+}
+.quick-entry-submit:hover:not(:disabled) { background: var(--brass-deep); }
+.quick-entry-submit:disabled {
+  background: var(--ink-500);
+  color: var(--ink-faint);
+  cursor: not-allowed;
+}
+
+@media (max-width: 560px) {
+  .quick-entry-grid { grid-template-columns: 1fr; }
+  .quick-entry-submit { padding: 15px 18px; font-size: 14px; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Світла тема каркаса — у дусі Wallet: сіре тло, білі картки з мʼякою тінню,
+   дрібні сірі підписи капітеллю, жирні темні числа, зелений акцент.
+   Імена змінних лишились від «private ledger», щоб успадковані панелі
+   (рахунки, довідник, бекап, аналітика) перефарбувались автоматично.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.app {
+  --ink-900:        #E4E7EB;   /* найтемніший фон — розділювальні зони */
+  --ink-800:        #F1F3F6;   /* тло сторінки */
+  --ink-700:        #FFFFFF;   /* поверхня картки */
+  --ink-600:        #FFFFFF;   /* піднята поверхня / рядок */
+  --ink-500:        #F4F6F8;   /* фон інпута / hover */
+  --rule-strong:    #D5DAE1;   /* видима межа */
+  --rule:           #E5E9EE;   /* звичайна межа */
+  --rule-soft:      #EDF0F4;   /* волосяний розділювач */
+
+  --paper:          #14181D;   /* основний текст */
+  --paper-dim:      #545C68;   /* другорядний */
+  --ink-mute:       #8A929E;   /* підписи, капітель */
+  --ink-faint:      #B2B9C4;   /* плейсхолдер / disabled */
+
+  --brass:          #16B364;   /* акцент — зелений, як у Wallet */
+  --brass-deep:     #0E8F4C;
+  --brass-glow:     rgba(22, 179, 100, 0.10);
+  --brass-line:     rgba(22, 179, 100, 0.30);
+
+  --gain:           #16B364;
+  --gain-soft:      rgba(22, 179, 100, 0.10);
+  --gain-line:      rgba(22, 179, 100, 0.28);
+
+  --oxblood:        #E5484D;
+  --oxblood-soft:   rgba(229, 72, 77, 0.09);
+  --oxblood-line:   rgba(229, 72, 77, 0.28);
+
+  --indigo:         #2F7CF6;
+  --indigo-soft:    rgba(47, 124, 246, 0.10);
+
+  --shadow-card:    0 1px 2px rgba(20, 24, 29, 0.05), 0 6px 16px -10px rgba(20, 24, 29, 0.28);
+
+  --font-serif:     "DM Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-sans:      "DM Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono:      "IBM Plex Mono", ui-monospace, monospace;
+}
+
+/* Заголовки: index.css фарбує h1/h2 у --text-h (майже чорний у світлій темі
+   і майже білий у темній), через що вони зникали на тлі. Фіксуємо явно. */
+.app h1, .app h2, .app h3 { color: var(--paper); }

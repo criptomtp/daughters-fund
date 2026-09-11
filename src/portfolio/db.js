@@ -1,6 +1,6 @@
 import Dexie from "dexie";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 class PortfolioDB extends Dexie {
   constructor() {
@@ -184,6 +184,24 @@ class PortfolioDB extends Dexie {
       couponPayments: "id, lotId, scheduledDate, status, [lotId+scheduledDate]",
       cashTransactions: "id, accountId, date, kind, currency, [accountId+date], [accountId+currency], [refId+refType]",
       snapshots: "date",
+    });
+
+    // v6 — закриття лоту. Без нього погашений папір лишався б у портфелі
+    // назавжди: вартість рахується від номіналу, а номінал нікуди не дівається.
+    this.version(6).stores({
+      persons:  "id, type, name",
+      brokers:  "id, name",
+      accounts: "id, kind, brokerId, name",
+      bondReferences: "isin, type, currency, maturityDate",
+      lots: "id, isin, accountId, purchaseDate, closedAt, [accountId+isin]",
+      couponPayments: "id, lotId, scheduledDate, status, [lotId+scheduledDate]",
+      cashTransactions: "id, accountId, date, kind, currency, [accountId+date], [accountId+currency], [refId+refType]",
+      snapshots: "date",
+    }).upgrade(async tx => {
+      const lots = tx.table("lots");
+      for (const lot of await lots.toArray()) {
+        if (lot.closedAt === undefined) await lots.put({ ...lot, closedAt: null, closedReason: null });
+      }
     });
   }
 }

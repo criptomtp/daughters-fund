@@ -2,8 +2,8 @@ import { useMemo, useEffect, useState } from "react";
 import { useLots } from "./hooks/useLots.js";
 import { useBonds } from "./hooks/useBonds.js";
 import { useCoupons } from "./hooks/useCoupons.js";
-import { useCashBalance } from "./hooks/useTransactions.js";
-import { accountSummary } from "./calculations.js";
+import { useCashBalance, useTransactions } from "./hooks/useTransactions.js";
+import { accountSummary, portfolioXIRR } from "./calculations.js";
 import { HeroTile } from "./HeroTile.jsx";
 import { GoalsPanel } from "./GoalsPanel.jsx";
 import { MaturityLadder } from "./MaturityLadder.jsx";
@@ -55,6 +55,21 @@ export function AccountDashboard({ accountFilter, accounts, persons }) {
   const mainCash = cashBalance[mainCur] || 0;
   const totalAssets = (summary.byCurrency[mainCur]?.currentValue || 0) + mainCash;
 
+  // Реальна дохідність портфеля: XIRR зовнішніх потоків (внески/зняття) проти
+  // поточної вартості. Лише для "Усі рахунки" — перекази між власними рахунками
+  // там взаємно скорочуються.
+  // Без useMemo: рахується лише по зовнішніх потоках (їх десятки, не тисячі),
+  // а ручна мемоізація тут ламала React Compiler через похідний mainCur.
+  const { list: allTxs } = useTransactions({ limit: 100000 });
+  const xirrPct = (!isAll || totalAssets <= 0)
+    ? null
+    : portfolioXIRR({
+        transactions: allTxs,
+        currency: mainCur,
+        terminalValue: totalAssets,
+        asOfDate: now,
+      });
+
   return (
     <div className="dashboard-stack">
       <HeroTile accountFilter={accountFilter} />
@@ -81,6 +96,9 @@ export function AccountDashboard({ accountFilter, accounts, persons }) {
         <Tile label="Сума активів" value={fmt(totalAssets, mainCur)} accent />
         <Tile label="Отримано YTD" value={fmt(summary.receivedYTD, mainCur)} good />
         <Tile label="Очікується (12 міс)" value={fmt(summary.scheduledNext12m, mainCur)} good />
+        {xirrPct != null && (
+          <Tile label="Дохідність (XIRR)" value={`${xirrPct.toFixed(1)}%/рік`} good={xirrPct >= 0} bad={xirrPct < 0} accent />
+        )}
       </div>
 
       {currencies.length > 1 && (

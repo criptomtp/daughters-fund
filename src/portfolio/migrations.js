@@ -1,6 +1,6 @@
 import { SCHEMA_VERSION } from "./db.js";
 
-const MIGRATIONS = {
+export const MIGRATIONS = {
   // v1 → v2: Owner розщеплено на Person + Account, додано Broker
   1: (payload) => {
     const oldOwners = payload.data.owners || [];
@@ -151,6 +151,21 @@ const MIGRATIONS = {
     ...payload,
     schemaVersion: 5,
     data: { ...payload.data, snapshots: payload.data.snapshots || [] },
+  }),
+
+  // v5 → v6: у лота з'явилося закриття (погашення або продаж). Старі лоти всі
+  // відкриті. Крок обов'язковий: без нього бекап v5 не відновлюється взагалі —
+  // цикл нижче кидає «Немає міграції з версії 5», і це саме той момент, коли
+  // бекап потрібен найбільше.
+  5: (payload) => ({
+    ...payload,
+    schemaVersion: 6,
+    data: {
+      ...payload.data,
+      lots: (payload.data.lots || []).map(l => ({
+        closedAt: null, closedReason: null, ...l,
+      })),
+    },
   }),
 };
 

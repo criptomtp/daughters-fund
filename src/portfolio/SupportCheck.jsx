@@ -59,6 +59,13 @@ export function SupportCheck({ children }) {
 
   return (
     <>
+      {isIosBrowser() && !isInstalled() && (
+        <div className="persist-warning danger">
+          ⚠ <strong>Safari видаляє дані сайту після 7 днів без відвідування.</strong>
+          {" "}Додай застосунок на екран «Домівка» (Поділитися → На екран Домівки) —
+          {" "}встановлені веб-застосунки під це правило не підпадають.
+        </div>
+      )}
       {persisted === false && (
         <div className="persist-warning">
           ⚠ Браузер може видалити локальні дані у low-storage режимі.
@@ -68,4 +75,24 @@ export function SupportCheck({ children }) {
       {children}
     </>
   );
+}
+
+// Safari з iOS 13.4 чистить усе script-writable сховище (IndexedDB, localStorage,
+// service worker) через 7 днів без взаємодії з сайтом. Веб-застосунки, додані на
+// екран «Домівка», рахують дні окремо і під це правило не підпадають — тому це
+// не косметична порада, а єдиний спосіб не втратити базу.
+function isIosBrowser() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  const iosClassic = /iPad|iPhone|iPod/.test(ua);
+  // iPadOS від 13-ї версії представляється як Macintosh — розрізняємо по тачу
+  const iPadOS = /Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+  return iosClassic || iPadOS;
+}
+
+function isInstalled() {
+  if (typeof window === "undefined") return false;
+  if (window.navigator?.standalone === true) return true;          // iOS home-screen
+  try { return window.matchMedia("(display-mode: standalone)").matches; }
+  catch { return false; }
 }

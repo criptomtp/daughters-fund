@@ -184,6 +184,52 @@ export function accruedInterest(bond, lot, asOfDate = new Date().toISOString()) 
   return (sincePrev / periodDays) * periodGross;
 }
 
+/**
+ * НКД на 1 штуку, порахований із фактичного графіка виплат.
+ *
+ * accruedInterest() вище відлічує купонні періоди від issueDate — це вірно лише
+ * для паперів, куплених на первинному розміщенні. Для дорозміщень (а це майже всі
+ * папери, підтягнуті з реєстру НБУ) issueDate — дата траншу, а купонний період
+ * почався раніше, тож відлік від неї дає завищений НКД.
+ *
+ * Тут період беремо з самого графіка: попередня виплата → наступна.
+ * Повертає 0, якщо графіка немає або всі виплати вже позаду.
+ */
+export function accruedFromSchedule(bond, asOfDate = new Date().toISOString()) {
+  const schedule = bond?.customSchedule;
+  if (!Array.isArray(schedule) || schedule.length === 0) return 0;
+
+  const rows = schedule
+    .filter(r => r?.date)
+    .map(r => ({ date: r.date.slice(0, 10), amount: Number(r.amountPerPiece) || 0 }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (rows.length === 0) return 0;
+
+  const today = String(asOfDate).slice(0, 10);
+  const nextIdx = rows.findIndex(r => r.date > today);
+  if (nextIdx === -1) return 0;                 // усе вже погашено
+  const next = rows[nextIdx];
+
+  // Купонна частина наступної виплати: якщо це погашення, тіло не входить у НКД.
+  const face = Number(bond.faceValue) || 0;
+  const couponPart = next.amount > face ? next.amount - face : next.amount;
+  if (couponPart <= 0) return 0;
+
+  const prevDate = nextIdx > 0
+    ? rows[nextIdx - 1].date
+    : addMonths(next.date, -12 / (bond.couponFrequency || 2)).slice(0, 10);
+
+  const prev = toDate(prevDate);
+  const nxt = toDate(next.date);
+  const periodDays = (nxt - prev) / MS_PER_DAY;
+  if (periodDays <= 0) return 0;
+
+  const elapsed = (toDate(today) - prev) / MS_PER_DAY;
+  if (elapsed <= 0) return 0;
+
+  return couponPart * Math.min(elapsed / periodDays, 1);
+}
+
 // ── Per-lot ─────────────────────────────────────────────────────────────────
 
 export function lotAccruedTotal(lot) {
@@ -201,21 +247,46 @@ export function lotPrincipal(bond, lot) {
 }
 
 export function lotCurrentValue(bond, lot, asOfDate = new Date().toISOString()) {
+  // Закритий лот (погашений або проданий) з цієї дати в портфелі не рахується —
+  // гроші за нього вже лежать у готівці як окрема транзакція.
+  if (lot.closedAt && String(lot.closedAt).slice(0, 10) <= String(asOfDate).slice(0, 10)) return 0;
   if (!bond) return lot.quantity * lot.purchasePrice;
-  // Zero-coupon / discount bond: it pays no coupons, so its value accretes
-  // linearly from purchase price toward face over purchase→maturity instead of
-  // jumping to par on day 1 (which produced a phantom unrealized gain).
-  if ((!bond.couponRate || !bond.couponFrequency) && bond.maturityDate) {
-    const principal = lotPrincipal(bond, lot);
-    const cost = lot.quantity * lot.purchasePrice;
+
+  const principal = lotPrincipal(bond, lot);
+  const cost = lot.quantity * lot.purchasePrice;     // чиста ціна × кількість
+  const isZeroCoupon = !bond.couponRate || !bond.couponFrequency;
+
+  // Амортизація премії/дисконту: вартість тіла йде лінійно від ціни покупки до
+  // номіналу за період покупка→погашення. Без цього папір, куплений за 108%
+  // номіналу, у день покупки показував би збиток 8% — фантомний, бо премію
+  // компенсує підвищений купон. Так само працює і для дисконтних паперів.
+  let body = principal;
+  if (bond.maturityDate) {
     const start = toDate(lot.purchaseDate).getTime();
     const end = toDate(bond.maturityDate).getTime();
     const asOf = toDate(asOfDate).getTime();
-    if (end <= start) return principal;
-    const frac = Math.min(1, Math.max(0, (asOf - start) / (end - start)));
-    return cost + (principal - cost) * frac;
+    if (end > start) {
+      const frac = Math.min(1, Math.max(0, (asOf - start) / (end - start)));
+      body = cost + (principal - cost) * frac;
+    }
+  } else if (isZeroCoupon) {
+    body = cost;
   }
-  return lotPrincipal(bond, lot) + accruedInterest(bond, lot, asOfDate);
+
+  if (isZeroCoupon) return body;                     // купонів немає — НКД теж
+  return body + lotAccrued(bond, lot, asOfDate);
+}
+
+/**
+ * НКД по лоту. Якщо у випуску є фактичний графік виплат (наприклад підтягнутий
+ * з реєстру НБУ) — рахуємо з нього, бо для дорозміщень відлік від issueDate
+ * завищує НКД. Інакше — стара формула від дати випуску.
+ */
+function lotAccrued(bond, lot, asOfDate) {
+  if (Array.isArray(bond.customSchedule) && bond.customSchedule.length > 0) {
+    return accruedFromSchedule(bond, asOfDate) * lot.quantity;
+  }
+  return accruedInterest(bond, lot, asOfDate);
 }
 
 export function lotYTM(bond, lot) {
@@ -247,6 +318,7 @@ export function accountSummary({
 
   const lotCurrency = new Map();
   for (const lot of lots) {
+    if (lot.closedAt && String(lot.closedAt).slice(0, 10) <= String(asOfDate).slice(0, 10)) continue;
     const inv = lotInvested(lot);
     invested += inv;
     const bond = bondsByIsin.get(lot.isin);
@@ -398,9 +470,74 @@ export function beneficiaryShare(account, personId) {
   return 1 / ids.length;
 }
 
+/**
+ * Скільки з портфеля припадає на конкретну особу.
+ *
+ * Одне джерело для головного екрана і для екрана цілей — інакше на «Фонді»
+ * і в «Доньках» під однаковим підписом стояли б різні числа (так і було:
+ * головний рахував по номіналу, цілі — по поточній вартості з готівкою).
+ */
+export function personShareValue({
+  person, accounts, lots, bondsByIsin,
+  cashByAccount = new Map(),
+  extraByAccount = new Map(),        // біржові рахунки: оцінка монет у гривні
+  asOfDate = new Date().toISOString(),
+}) {
+  if (!person) return 0;
+  let total = 0;
+  for (const acc of accounts) {
+    const share = beneficiaryShare(acc, person.id);
+    if (!share) continue;
+    let accTotal = 0;
+    for (const lot of lots) {
+      if (lot.accountId !== acc.id) continue;
+      const bond = bondsByIsin.get(lot.isin);
+      if (bond) accTotal += lotCurrentValue(bond, lot, asOfDate);
+    }
+    const cashObj = cashByAccount.get?.(acc.id) || cashByAccount[acc.id] || {};
+    for (const cur of Object.keys(cashObj)) accTotal += Number(cashObj[cur]) || 0;
+    accTotal += Number(extraByAccount.get?.(acc.id) ?? extraByAccount[acc.id] ?? 0) || 0;
+    total += accTotal * share;
+  }
+  return total;
+}
+
+/**
+ * Скільки треба відкладати щомісяця, щоб дійти до цілі.
+ *
+ * Раніше рахувалось простим діленням залишку на кількість місяців — тобто з
+ * припущенням, що гроші лежать під 0%. Для 12-річного горизонту під 17% це
+ * завищує потрібний внесок утричі й перетворює будь-яку ціль на «не встигаєш».
+ * Тут враховано і зростання вже накопиченого, і складний відсоток на внески.
+ */
+export function requiredMonthlyContribution({ target, current, years, annualReturnPct = 0 }) {
+  const n = Math.round(years * 12);
+  if (n <= 0) return null;
+  const r = (Number(annualReturnPct) || 0) / 100;
+  if (r <= 0) return Math.max(0, target - current) / n;
+
+  const monthly = Math.pow(1 + r, 1 / 12) - 1;
+  const grownCurrent = current * Math.pow(1 + r, years);
+  const need = Math.max(0, target - grownCurrent);
+  if (need === 0) return 0;
+  return need * monthly / (Math.pow(1 + monthly, n) - 1);
+}
+
+/** Скільки вийде за поточного темпу внесків — дзеркало до попередньої функції. */
+export function projectedAtRate({ current, monthly, years, annualReturnPct = 0 }) {
+  const n = Math.round(years * 12);
+  const r = (Number(annualReturnPct) || 0) / 100;
+  if (n <= 0) return current;
+  if (r <= 0) return current + monthly * n;
+  const m = Math.pow(1 + r, 1 / 12) - 1;
+  return current * Math.pow(1 + r, years) + monthly * ((Math.pow(1 + m, n) - 1) / m);
+}
+
 export function goalProgress({
   person, accounts, lots, bondsByIsin, cashByAccount = new Map(),
+  extraByAccount = new Map(),
   fxRates = null,
+  annualReturnPct = 0,
   asOfDate = new Date().toISOString(),
 }) {
   if (!person.targetAmount || !person.birthDate) return null;
@@ -432,7 +569,8 @@ export function goalProgress({
       const conv = convertCurrency(cashObj[cur] || 0, cur, currency, fxRates);
       if (conv != null) accCash += conv;
     }
-    const accTotal = accAssets + accCash;
+    const accExtra = Number(extraByAccount.get?.(acc.id) ?? extraByAccount[acc.id] ?? 0) || 0;
+    const accTotal = accAssets + accCash + accExtra;
     currentValue += accTotal * beneficiaryShare(acc, person.id);
   }
 
@@ -443,7 +581,7 @@ export function goalProgress({
   // so the UI can show the shortfall as a lump sum due instead.
   const deadlineReached = yearsLeft <= 0 && remaining > 0;
   const requiredMonthly = yearsLeft > 0 && remaining > 0
-    ? remaining / (yearsLeft * 12)
+    ? requiredMonthlyContribution({ target: person.targetAmount, current: currentValue, years: yearsLeft, annualReturnPct })
     : 0;
 
   return {
@@ -483,20 +621,146 @@ export function maturityLadder(lots, bondsByIsin) {
 // ── Next coupon helper ─────────────────────────────────────────────────────
 
 export function findNextCoupon(coupons, lots, accounts, asOfDate = new Date().toISOString()) {
+  // Compare on date granularity: scheduledDate may be date-only while asOfDate is
+  // a full datetime — a coupon due TODAY must still count as upcoming (see the
+  // matching fix in accountSummary).
+  const today = asOfDate.slice(0, 10);
   const upcoming = coupons
-    .filter(c => c.status === "scheduled" && c.scheduledDate >= asOfDate)
+    .filter(c => c.status === "scheduled" && c.scheduledDate.slice(0, 10) >= today)
     .sort((a, b) => (a.scheduledDate || "").localeCompare(b.scheduledDate || ""));
   if (upcoming.length === 0) return null;
   const next = upcoming[0];
   const lot = lots.find(l => l.id === next.lotId);
   const account = lot && accounts.find(a => a.id === lot.accountId);
-  const daysAway = Math.ceil((new Date(next.scheduledDate) - new Date(asOfDate)) / MS_PER_DAY);
+  const daysAway = Math.round(
+    (toDate(next.scheduledDate.slice(0, 10)) - toDate(today)) / MS_PER_DAY
+  );
   return { coupon: next, lot, account, daysAway };
 }
 
 export function findOverdueCoupons(coupons, asOfDate = new Date().toISOString(), graceDays = 7) {
-  const cutoff = new Date(new Date(asOfDate).getTime() - graceDays * MS_PER_DAY).toISOString();
-  return coupons.filter(c => c.status === "scheduled" && c.scheduledDate < cutoff);
+  const cutoffDay = new Date(new Date(asOfDate).getTime() - graceDays * MS_PER_DAY)
+    .toISOString().slice(0, 10);
+  return coupons.filter(c => c.status === "scheduled" && c.scheduledDate.slice(0, 10) < cutoffDay);
+}
+
+// ── Portfolio-level return & contribution pace ─────────────────────────────
+
+// XIRR усього портфеля по ЗОВНІШНІХ потоках власника (deposit/withdrawal),
+// з поточною вартістю як термінальним потоком. Внутрішні рухи (купівлі лотів,
+// купони, перекази між власними рахунками) — не потоки власника, вони вже
+// відображені в terminalValue.
+export function portfolioXIRR({
+  transactions = [],
+  currency = "UAH",
+  terminalValue = 0,
+  asOfDate = new Date().toISOString(),
+}) {
+  const flows = [];
+  for (const t of transactions) {
+    if ((t.currency || "UAH") !== currency) continue;
+    if (t.kind === "deposit" || t.kind === "withdrawal") {
+      // Конвенція потоків власника: внесок = відтік від власника (−),
+      // зняття = притік (+). Суми в БД підписані (deposit +, withdrawal −).
+      flows.push({ date: t.date, amount: -(Number(t.amount) || 0) });
+    }
+  }
+  if (flows.length === 0 || !(terminalValue > 0)) return null;
+  flows.push({ date: asOfDate, amount: terminalValue });
+  const rate = xirr(flows);
+  return rate != null ? rate * 100 : null;
+}
+
+// Фактичний середній внесок на місяць за останні `months` місяців —
+// для порівняння з requiredMonthly із цілей (план/факт).
+export function avgMonthlyDeposits({
+  transactions = [],
+  currency = "UAH",
+  months = 6,
+  asOfDate = new Date().toISOString(),
+}) {
+  if (!(months > 0)) return 0;
+  const cutoff = new Date(new Date(asOfDate).getTime() - months * 30.44 * MS_PER_DAY).toISOString();
+  let sum = 0;
+  for (const t of transactions) {
+    if (t.kind !== "deposit") continue;
+    if ((t.currency || "UAH") !== currency) continue;
+    if ((t.date || "") < cutoff) continue;
+    sum += Number(t.amount) || 0;
+  }
+  return sum / months;
+}
+
+/**
+ * Купонні виплати згруповані в ПОДІЇ так, як їх бачить власник.
+ *
+ * У базі купон зберігається по-лотово: купуєш 5 шт щомісяця одного випуску —
+ * через рік у ту саму купонну дату лежить 12 окремих записів, через три роки — 36.
+ * Емітент же платить одним переказом. Тому для UI зводимо їх у одну подію
+ * по ключу isin + accountId + дата, зберігаючи id всіх лотових записів,
+ * щоб підтвердження застосувалося одразу до групи.
+ */
+export function groupCouponEvents(coupons, lots) {
+  const lotById = new Map((lots || []).map(l => [l.id, l]));
+  const byKey = new Map();
+
+  for (const c of coupons || []) {
+    const lot = lotById.get(c.lotId);
+    if (!lot) continue;
+    const date = String(c.scheduledDate || "").slice(0, 10);
+    if (!date) continue;
+    const key = `${lot.isin}|${lot.accountId}|${date}`;
+
+    const acc = byKey.get(key) || {
+      key,
+      isin: lot.isin,
+      accountId: lot.accountId,
+      scheduledDate: date,
+      kind: c.kind || "coupon",
+      amountGross: 0,
+      amountNet: 0,
+      quantity: 0,
+      couponIds: [],
+      lotIds: [],
+      receivedCount: 0,
+      actualAmount: 0,
+      actualDate: null,
+    };
+
+    acc.amountGross += Number(c.amountGross) || 0;
+    acc.amountNet += Number(c.amountNet) || 0;
+    acc.quantity += Number(lot.quantity) || 0;
+    acc.couponIds.push(c.id);
+    acc.lotIds.push(lot.id);
+    // Погашення "сильніше" за купон: якщо хоч один запис несе тіло, подія теж
+    if (c.kind === "coupon+redemption" || c.kind === "redemption") acc.kind = c.kind;
+    if (c.status === "received") {
+      acc.receivedCount += 1;
+      acc.actualAmount += Number(c.actualAmount ?? c.amountNet) || 0;
+      acc.actualDate = acc.actualDate || (c.actualDate ? String(c.actualDate).slice(0, 10) : null);
+    }
+    byKey.set(key, acc);
+  }
+
+  return [...byKey.values()]
+    .map(e => ({
+      ...e,
+      status: e.receivedCount === 0
+        ? "scheduled"
+        : e.receivedCount === e.couponIds.length ? "received" : "partial",
+    }))
+    .sort((a, b) => a.scheduledDate.localeCompare(b.scheduledDate));
+}
+
+/** Найближча незакрита подія виплати (та, яку варто показати на головному). */
+export function nextCouponEvent(events, asOfDate = new Date().toISOString()) {
+  const today = String(asOfDate).slice(0, 10);
+  const pending = events.filter(e => e.status !== "received");
+  // Прострочене важливіше за майбутнє: спершу те, що мало прийти і не позначене
+  const overdue = pending.filter(e => e.scheduledDate <= today);
+  if (overdue.length) return { ...overdue[overdue.length - 1], overdue: true };
+  const upcoming = pending.find(e => e.scheduledDate > today);
+  return upcoming ? { ...upcoming, overdue: false } : null;
 }
 
 // ── Group coupons by month ─────────────────────────────────────────────────
@@ -510,4 +774,61 @@ export function groupCouponsByMonth(coupons) {
     groups.get(key).items.push(c);
   }
   return Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/**
+ * Позиція = випуск, а не лот.
+ *
+ * Купуючи щомісяця один папір, за рік маєш дванадцять лотів одного ISIN.
+ * Для власника це одна позиція; окремі покупки цікаві лише коли розгорнути.
+ * Дохідність рахуємо по всіх грошових потоках позиції разом (XIRR), а не
+ * як середнє з лотових — середнє з відсотків не має фінансового сенсу.
+ */
+export function groupPositions({ lots = [], bondsByIsin = new Map(), coupons = [], asOfDate = new Date().toISOString() }) {
+  const today = String(asOfDate).slice(0, 10);
+  const open = lots.filter(l => !l.closedAt || String(l.closedAt).slice(0, 10) > today);
+  const byIsin = new Map();
+
+  for (const lot of open) {
+    const bond = bondsByIsin.get(lot.isin);
+    if (!bond) continue;
+    const p = byIsin.get(lot.isin) || {
+      isin: lot.isin, bond, lots: [], quantity: 0, invested: 0, value: 0,
+      receivedCoupons: 0, accountIds: new Set(),
+    };
+    p.lots.push(lot);
+    p.quantity += lot.quantity;
+    p.invested += lotInvested(lot);
+    p.value += lotCurrentValue(bond, lot, asOfDate);
+    p.accountIds.add(lot.accountId);
+    byIsin.set(lot.isin, p);
+  }
+
+  const lotIds = new Map(open.map(l => [l.id, l.isin]));
+  for (const c of coupons) {
+    if (c.status !== "received") continue;
+    const isin = lotIds.get(c.lotId);
+    const p = isin && byIsin.get(isin);
+    if (p) p.receivedCoupons += Number(c.actualAmount ?? c.amountNet) || 0;
+  }
+
+  return [...byIsin.values()].map(p => {
+    // Дохідність позиції — це зафіксована при купівлі YTM, зважена за сумами
+    // вкладень, а НЕ реалізований XIRR за фактом. Реалізований на короткому
+    // вікні вибухає: папір, куплений місяць тому і встигший заплатити купон,
+    // давав «109% річних». Зафіксована YTM стабільна й порівнянна з ринком —
+    // саме те, що треба знати: під скільки я зайшов проти того, що дають зараз.
+    let weighted = 0, weight = 0;
+    for (const l of p.lots) {
+      const y = lotXIRR(p.bond, l) ?? lotYTM(p.bond, l);
+      const inv = lotInvested(l);
+      if (y != null && inv > 0) { weighted += y * inv; weight += inv; }
+    }
+    return {
+      ...p,
+      accountIds: [...p.accountIds],
+      gain: p.value + p.receivedCoupons - p.invested,
+      ytm: weight > 0 ? weighted / weight : null,
+    };
+  }).sort((a, b) => b.value - a.value);
 }
