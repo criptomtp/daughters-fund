@@ -181,6 +181,24 @@ async function requirePocket(pocketId) {
   return pocket;
 }
 
+/**
+ * Перевіряє, що рахунком дозволено користуватися цій кишені.
+ *
+ * Стосується лише НОВИХ операцій. Редагування старих записів не чіпаємо:
+ * доступність — налаштування, додане пізніше, і воно не має заднім числом
+ * блокувати виправлення того, що вже сталося.
+ */
+async function requireAccountInPocket(accountId, pocketId) {
+  const acc = await db.accounts.get(accountId);
+  if (!acc) throw new Error("Рахунок не знайдено");
+  const allowed = acc.pocketIds || [];
+  if (allowed.length && !allowed.includes(pocketId)) {
+    const pocket = await db.pockets.get(pocketId);
+    throw new Error(`Рахунок «${acc.name}» не доступний кишені «${pocket?.name || "—"}»`);
+  }
+  return acc;
+}
+
 export const accounts = {
   list: () => db.accounts.orderBy("name").toArray(),
   get:  (id) => db.accounts.get(id),
@@ -217,6 +235,7 @@ export const accounts = {
       primaryCurrency: data.primaryCurrency || "UAH",
       // Біржовий рахунок (kind "exchange") ведеться інакше: угод не пишемо,
       // тримаємо поточні залишки монет як факт і переоцінюємо за курсом.
+      pocketIds: Array.isArray(data.pocketIds) ? [...data.pocketIds] : [],
       holdingsByPocket: data.holdingsByPocket && typeof data.holdingsByPocket === "object"
         ? { ...data.holdingsByPocket } : null,
       holdingsAt: data.holdingsAt || null,
@@ -418,6 +437,7 @@ export const transactions = {
     const acc = await db.accounts.get(accountId);
     if (!acc) throw new Error("Рахунок не знайдено");
     await requirePocket(pocketId);
+    await requireAccountInPocket(accountId, pocketId);
     return await transactions._addRaw({
       accountId, pocketId, date, currency: currency || acc.primaryCurrency,
       amount: amt, kind: "deposit", notes,
@@ -431,6 +451,7 @@ export const transactions = {
     const acc = await db.accounts.get(accountId);
     if (!acc) throw new Error("Рахунок не знайдено");
     await requirePocket(pocketId);
+    await requireAccountInPocket(accountId, pocketId);
     return await transactions._addRaw({
       accountId, pocketId, date, currency: currency || acc.primaryCurrency,
       amount: -amt, kind: "withdrawal", notes,
@@ -456,6 +477,7 @@ export const transactions = {
     // Кишеня обов'язкова і тут: воронка одна для всіх операцій. Те, що крипта
     // повністю дитяча — рішення інтерфейсу, а не сховища.
     await requirePocket(pocketId);
+    await requireAccountInPocket(accountId, pocketId);
 
     await db.transaction("rw", [db.cashTransactions, db.accounts], async () => {
       if (amt > 0) {
@@ -663,6 +685,7 @@ export const lots = {
     const acc = await db.accounts.get(data.accountId);
     if (!acc) throw new Error("Рахунок не знайдено");
     await requirePocket(data.pocketId);
+    await requireAccountInPocket(data.accountId, data.pocketId);
 
     const qty = Math.floor(Number(data.quantity));
     let accruedPerPiece;

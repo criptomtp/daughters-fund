@@ -23,18 +23,22 @@ export function useTransactions({ accountId, kind, currency, limit = 200 } = {})
   };
 }
 
-export function useCashBalance(accountId) {
+// pocketId звужує залишок до однієї кишені. Без нього у просторі «Я»
+// під написом «доступно» стояли гроші доньок — сума, якою розпоряджатися
+// не можна, але яку інтерфейс пропонував витратити.
+export function useCashBalance(accountId, pocketId = null) {
   const balance = useLiveQuery(async () => {
-    const txs = accountId
+    let txs = accountId
       ? await db.cashTransactions.where("accountId").equals(accountId).toArray()
       : await db.cashTransactions.toArray();
+    if (pocketId) txs = txs.filter(t => t.pocketId === pocketId);
     const result = {};
     for (const t of txs) {
       const cur = t.currency || "UAH";
       result[cur] = (result[cur] || 0) + (Number(t.amount) || 0);
     }
     return result;
-  }, [accountId], {});
+  }, [accountId, pocketId], {});
 
   return balance || {};
 }

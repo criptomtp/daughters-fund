@@ -149,6 +149,16 @@ export function AccountsManager() {
                       </span>
                       <span className="account-meta-sep">·</span>
                       <span>{lotCount} лот{lotCount === 1 ? "" : "и"}</span>
+                      {pockets.length > 1 && (
+                        <>
+                          <span className="account-meta-sep">·</span>
+                          <span>
+                            {(acc.pocketIds || []).length
+                              ? pockets.filter(pk => acc.pocketIds.includes(pk.id)).map(pk => pk.name).join(" + ")
+                              : "доступний усім"}
+                          </span>
+                        </>
+                      )}
                     </div>
                     {balanceCurrencies.length > 0 && (
                       <div className="account-card-balance">
@@ -205,6 +215,7 @@ export function AccountsManager() {
           kind={editing ? editing.kind : creating}
           initial={editing}
           persons={persons}
+          pockets={pockets}
           brokers={brokers}
           onSubmit={handleSubmit}
           onCancel={() => { setCreating(false); setEditing(null); }}
@@ -214,12 +225,13 @@ export function AccountsManager() {
   );
 }
 
-function AccountForm({ kind, initial, persons, brokers, onSubmit, onCancel }) {
+function AccountForm({ kind, initial, persons, pockets, brokers, onSubmit, onCancel }) {
   const isShared = kind === "shared";
   const [draft, setDraft] = useState(initial || {
     name: isShared ? "Спільний портфель" : "",
     kind,
     brokerId: brokers[0]?.id || "",
+    pocketIds: pockets.map(p => p.id),
     beneficiaryIds: isShared ? [] : (persons[0] ? [persons[0].id] : []),
     primaryCurrency: "UAH",
   });
@@ -240,6 +252,7 @@ function AccountForm({ kind, initial, persons, brokers, onSubmit, onCancel }) {
     if (!draft.name.trim() || !draft.brokerId) return;
     if (isShared && draft.beneficiaryIds.length < 2) return;
     if (!isShared && draft.beneficiaryIds.length !== 1) return;
+    if (!(draft.pocketIds || []).length) return;
     // beneficiaryWeights більше нічим не керують: частки рахуються від ваг
     // у кишені. Поле лишається в схемі, щоб старі бекапи відновлювались, але
     // нове значення сюди не пишеться — інакше в базі жили б два джерела
@@ -248,6 +261,7 @@ function AccountForm({ kind, initial, persons, brokers, onSubmit, onCancel }) {
   };
 
   const canSubmit = draft.name.trim() && draft.brokerId &&
+    (draft.pocketIds || []).length > 0 &&
     (isShared ? draft.beneficiaryIds.length >= 2 : draft.beneficiaryIds.length === 1);
 
   return (
@@ -303,6 +317,31 @@ function AccountForm({ kind, initial, persons, brokers, onSubmit, onCancel }) {
                     onClick={() => toggleBeneficiary(p.id)}
                   >
                     {p.emoji} {p.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="form-field form-field--full">
+            <span className="form-label">Яким кишеням доступний<span className="req">*</span></span>
+            <span className="form-hint">
+              Рахунок у брокера може бути спільним. Але поки кишеня тут не
+              позначена, вона цього рахунку не бачить і не може на нього
+              записувати — щоб чужі гроші не потрапляли у твій список.
+            </span>
+            <div className="owner-members-grid">
+              {pockets.map(pk => {
+                const on = (draft.pocketIds || []).includes(pk.id);
+                return (
+                  <button key={pk.id} type="button"
+                    className={`member-chip ${on ? "active" : ""}`}
+                    style={{ "--chip-color": pk.color }}
+                    onClick={() => {
+                      const cur = draft.pocketIds || [];
+                      upd("pocketIds", on ? cur.filter(x => x !== pk.id) : [...cur, pk.id]);
+                    }}>
+                    {pk.emoji} {pk.name}
                   </button>
                 );
               })}

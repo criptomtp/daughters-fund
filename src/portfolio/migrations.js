@@ -1,4 +1,4 @@
-import { SCHEMA_VERSION, planPockets, planHoldingsByPocket } from "./db.js";
+import { SCHEMA_VERSION, planPockets, planHoldingsByPocket, planAccountPockets } from "./db.js";
 
 export const MIGRATIONS = {
   // v1 → v2: Owner розщеплено на Person + Account, додано Broker
@@ -196,6 +196,23 @@ export const MIGRATIONS = {
     return {
       ...payload,
       schemaVersion: 8,
+      data: { ...payload.data, accounts: accounts.map(a => byId.get(a.id) || a) },
+    };
+  },
+
+  // v8 → v9: рахунок отримує список кишень, які ним користуються.
+  8: (payload) => {
+    const accounts = payload.data.accounts || [];
+    const next = planAccountPockets({
+      accounts,
+      pockets: payload.data.pockets || [],
+      lots: payload.data.lots || [],
+      cashTransactions: payload.data.cashTransactions || [],
+    });
+    const byId = new Map(next.map(a => [a.id, a]));
+    return {
+      ...payload,
+      schemaVersion: 9,
       data: { ...payload.data, accounts: accounts.map(a => byId.get(a.id) || a) },
     };
   },

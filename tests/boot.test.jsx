@@ -423,3 +423,53 @@ describe("простори не бачать чужого", () => {
     expect(v.get("mine")).toBeCloseTo(20000, 2);
   });
 });
+
+describe("рахунок належить кишеням, які ним користуються", () => {
+  async function setup() {
+    const { accounts, brokers, persons, pockets } =
+      await import("../src/portfolio/repository.js");
+    const br = await brokers.add({ name: "ICU" + Math.random() });
+    const kid = await persons.add({ name: "K" + Math.random(), type: "child" });
+    const dad = await persons.add({ name: "D" + Math.random(), type: "parent" });
+    const kids = await pockets.add({ name: "K" + Math.random(), memberWeights: { [kid.id]: 1 } });
+    const mine = await pockets.add({ name: "M" + Math.random(), memberWeights: { [dad.id]: 1 } });
+    const acc = await accounts.add({
+      name: "ICU" + Math.random(), brokerId: br.id, kind: "personal",
+      beneficiaryIds: [kid.id], pocketIds: [kids.id],
+    });
+    return { acc, kids, mine };
+  }
+
+  it("внесок у кишеню, якій рахунок не доступний, не проходить", async () => {
+    const { transactions } = await import("../src/portfolio/repository.js");
+    const { acc, mine } = await setup();
+    await expect(transactions.deposit({
+      accountId: acc.id, pocketId: mine.id, amount: 1000, currency: "UAH", date: "2026-09-12",
+    })).rejects.toThrow("не доступний кишені");
+  });
+
+  it("своїй кишені рахунок доступний", async () => {
+    const { transactions } = await import("../src/portfolio/repository.js");
+    const { acc, kids } = await setup();
+    const tx = await transactions.deposit({
+      accountId: acc.id, pocketId: kids.id, amount: 1000, currency: "UAH", date: "2026-09-12",
+    });
+    expect(tx.pocketId).toBe(kids.id);
+  });
+
+  it("купівля на чужий рахунок не проходить", async () => {
+    const { bonds, lots } = await import("../src/portfolio/repository.js");
+    const { acc, mine } = await setup();
+    const isin = "UA400003" + String(Math.floor(Math.random() * 9000) + 1000);
+    await bonds.add({
+      isin, ticker: "T", type: "ovdp", currency: "UAH", faceValue: 1000,
+      couponRate: 16, couponFrequency: 1,
+      issueDate: "2026-01-01", maturityDate: "2027-01-01",
+      customSchedule: [{ date: "2027-01-01", amountPerPiece: 1080, kind: "coupon+redemption" }],
+    });
+    await expect(lots.add({
+      isin, accountId: acc.id, pocketId: mine.id, purchaseDate: "2026-09-12",
+      quantity: 1, purchasePrice: 1000,
+    })).rejects.toThrow("не доступний кишені");
+  });
+});

@@ -1,6 +1,6 @@
 import Dexie from "dexie";
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 class PortfolioDB extends Dexie {
   constructor() {
@@ -256,7 +256,58 @@ class PortfolioDB extends Dexie {
       });
       if (moved.length) await tx.table("accounts").bulkPut(moved);
     });
+
+    // v9 — рахунок знає, чиї кишені ним користуються. Досі список рахунків
+    // був спільним, і в просторі «Я» пропонувалось купувати на рахунок
+    // доньок, ще й з їхнім залишком під написом «доступно».
+    this.version(9).stores({
+      persons:  "id, type, name",
+      brokers:  "id, name",
+      accounts: "id, kind, brokerId, name",
+      pockets:  "id, name",
+      bondReferences: "isin, type, currency, maturityDate",
+      lots: "id, isin, accountId, pocketId, purchaseDate, closedAt, [accountId+isin], [pocketId+isin]",
+      couponPayments: "id, lotId, scheduledDate, status, [lotId+scheduledDate]",
+      cashTransactions: "id, accountId, pocketId, date, kind, currency, [accountId+date], [accountId+currency], [pocketId+date], [refId+refType]",
+      snapshots: "date",
+    }).upgrade(async tx => {
+      const next = planAccountPockets({
+        accounts: await tx.table("accounts").toArray(),
+        pockets: await tx.table("pockets").toArray(),
+        lots: await tx.table("lots").toArray(),
+        cashTransactions: await tx.table("cashTransactions").toArray(),
+      });
+      if (next.length) await tx.table("accounts").bulkPut(next);
+    });
   }
+}
+
+/**
+ * Проставляє рахункам кишені, які ними реально користуються.
+ *
+ * Відновлюється з фактів: якщо на рахунку є лоти чи операції кишені — вона
+ * ним користується. Порожній рахунок нікому не належав, тому лишається
+ * доступним усім: сховати його означало б загубити щойно створений.
+ */
+export function planAccountPockets({ accounts = [], pockets = [], lots = [], cashTransactions = [] }) {
+  const allIds = pockets.map(p => p.id);
+  const out = [];
+
+  for (const acc of accounts) {
+    if (Array.isArray(acc.pocketIds) && acc.pocketIds.length) continue;
+    const used = [];
+    for (const l of lots) {
+      if (l.accountId === acc.id && l.pocketId && !used.includes(l.pocketId)) used.push(l.pocketId);
+    }
+    for (const t of cashTransactions) {
+      if (t.accountId === acc.id && t.pocketId && !used.includes(t.pocketId)) used.push(t.pocketId);
+    }
+    for (const coins of Object.keys(acc.holdingsByPocket || {})) {
+      if (!used.includes(coins)) used.push(coins);
+    }
+    out.push({ ...acc, pocketIds: used.length ? used : allIds });
+  }
+  return out;
 }
 
 /**

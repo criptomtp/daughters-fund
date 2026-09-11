@@ -71,7 +71,10 @@ export function RecordSheet({ open, onClose, initialTab = "buy", market, pocket,
 // ── Внесок і купівля ───────────────────────────────────────────────────────
 
 function BuyForm({ onDone, market, pocketId }) {
-  const { list: accounts } = useAccounts();
+  const { list: allAccounts } = useAccounts();
+  // Показуємо лише рахунки, якими цій кишені дозволено користуватися.
+  // Інакше у просторі «Я» пропонувалось купувати на рахунок доньок.
+  const accounts = allAccounts.filter(a => !a.pocketIds?.length || a.pocketIds.includes(pocketId));
   const { list: bonds } = useBonds();
   const prefs = useMemo(() => loadPrefs(), []);
 
@@ -98,7 +101,7 @@ function BuyForm({ onDone, market, pocketId }) {
   const bond = isExchange ? null : bonds.find(b => b.isin === effIsin);
   const cur = bond?.currency || account?.primaryCurrency || "UAH";
 
-  const balances = useCashBalance(effAccountId);
+  const balances = useCashBalance(effAccountId, pocketId);
   const cashNow = balances[cur] || 0;
 
   // На біржу заходять долари. Внутрішній облік фонду ведеться в гривні, тому
@@ -162,7 +165,12 @@ function BuyForm({ onDone, market, pocketId }) {
   };
 
   if (accounts.length === 0) {
-    return <p className="sheet-empty">Спершу створи рахунок: Деталі → Рахунки.</p>;
+    return (
+      <p className="sheet-empty">
+        У цій кишені ще немає жодного рахунку. Додай його в «Деталі → Рахунки»
+        або познач там наявний рахунок як доступний цій кишені.
+      </p>
+    );
   }
 
   return (
@@ -445,7 +453,8 @@ function CouponForm({ onDone }) {
 // ── Переказ ────────────────────────────────────────────────────────────────
 
 function TransferForm({ onDone, pocketId }) {
-  const { list: accounts } = useAccounts();
+  const { list: allAccounts } = useAccounts();
+  const accounts = allAccounts.filter(a => !a.pocketIds?.length || a.pocketIds.includes(pocketId));
   const prefs = useMemo(() => loadPrefs(), []);
   const [fromId, setFromId] = useState(prefs.transferFrom || "");
   const [toId, setToId] = useState(prefs.transferTo || "");
@@ -459,7 +468,7 @@ function TransferForm({ onDone, pocketId }) {
   const from = accounts.find(a => a.id === effFrom);
   const to = accounts.find(a => a.id === effTo);
   const cur = from?.primaryCurrency || "UAH";
-  const balances = useCashBalance(effFrom);
+  const balances = useCashBalance(effFrom, pocketId);
 
   const amt = Number(amount) || 0;
   const canSubmit = from && to && effFrom !== effTo && amt > 0 && !busy;

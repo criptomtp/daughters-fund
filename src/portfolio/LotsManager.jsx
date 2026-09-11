@@ -291,9 +291,14 @@ function LotForm({ initial, isNew, bonds, accounts, pockets, brokers, brokersByI
   const bond = bonds.find(b => b.isin === draft.isin);
   const selectedAccount = accounts.find(a => a.id === draft.accountId);
   const selectedBroker  = brokersById.get(draft.brokerId);
-  const filteredAccounts = draft.brokerId
-    ? accounts.filter(a => a.brokerId === draft.brokerId)
+  // Рахунок мусить бути доступний обраній кишені — інакше запис піде
+  // на чужі гроші, і репозиторій його не прийме.
+  const forPocket = draft.pocketId
+    ? accounts.filter(a => !a.pocketIds?.length || a.pocketIds.includes(draft.pocketId))
     : accounts;
+  const filteredAccounts = draft.brokerId
+    ? forPocket.filter(a => a.brokerId === draft.brokerId)
+    : forPocket;
 
   const qty = Number(draft.quantity) || 0;
   const accruedPP = Number(draft.accruedInterestPerPiece) || 0;
@@ -305,7 +310,7 @@ function LotForm({ initial, isNew, bonds, accounts, pockets, brokers, brokersByI
     ? lotYTM(bond, { purchaseDate: draft.purchaseDate, purchasePrice: draft.purchasePrice })
     : null;
 
-  const balances = useCashBalance(draft.accountId);
+  const balances = useCashBalance(draft.accountId, draft.pocketId);
   const cur = bond?.currency || "UAH";
   const availableCash = balances[cur] || 0;
   const willBeShort = bond && total > 0 && availableCash < total;
