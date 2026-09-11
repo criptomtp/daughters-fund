@@ -77,7 +77,7 @@ function DrawdownChart({ navSeries }) {
   );
 }
 
-export function AnalyticsPanel() {
+export function AnalyticsPanel({ pocket }) {
   const { list: lots } = useLots({});
   const { list: bonds } = useBonds();
   const { list: accounts } = useAccounts();
@@ -124,7 +124,7 @@ export function AnalyticsPanel() {
   const effFrom = from < firstTx ? firstTx : from;
 
   const rawPoints = buildSeries({
-    lots, bondsByIsin, transactions: txs, accounts,
+    lots, bondsByIsin, transactions: txs, accounts, pocketId: pocket?.id || null,
     btc: prices.btc, fx: prices.fx, from: effFrom, stepDays: chosen.days && chosen.days <= 91 ? 1 : 3,
   });
   // Долар — це та сама серія, поділена на курс кожного дня. Так дохідність
@@ -134,6 +134,20 @@ export function AnalyticsPanel() {
   const months = monthlyBreakdown(points);
   const last = points[points.length - 1] || {};
   const ahead = futurePayments(coupons, lots, bondsByIsin, todayIso);
+
+  // Податок видно лише на різниці брутто й нетто у виплатах — окремої
+  // транзакції для нього немає, бо емітент утримує його до зарахування.
+  const tax = (() => {
+    const lotIds = new Set(lots.map(l => l.id));
+    let paid = 0, aheadTax = 0;
+    for (const c of coupons) {
+      if (!lotIds.has(c.lotId)) continue;
+      const t = (Number(c.amountGross) || 0) - (Number(c.amountNet) || 0);
+      if (t <= 0) continue;
+      if (c.status === "received") paid += t; else aheadTax += t;
+    }
+    return { paid, ahead: aheadTax };
+  })();
 
   // Нагадування про виплати — через календар телефона, а не через сервер:
   // дані портфеля не мають залишати пристрій заради сповіщень.
@@ -217,6 +231,22 @@ export function AnalyticsPanel() {
           </div>
         </div>
       </section>
+
+      {(tax.paid > 0 || tax.ahead > 0) && (
+        <section className="an-card">
+          <span className="strip-label">Податок на купони</span>
+          <div className="an-rows">
+            <div><span>Уже утримано</span><strong className="down">−{fmt(tax.paid, "UAH")}</strong></div>
+            <div><span>Ще утримають</span><strong className="down">−{fmt(tax.ahead, "UAH")}</strong></div>
+          </div>
+          <p className="an-sub">
+            ОВДП звільнені від податку (ПКУ 165.1.52). Утримання йде лише з
+            корпоративних купонів — 18% ПДФО + 5% військового збору. Платить
+            власник рахунку, розподілити це на когось іншого не можна, тож
+            дохідність без цього рядка була б завищеною.
+          </p>
+        </section>
+      )}
 
       <section className="an-card">
         <span className="strip-label">Ще надійде по облігаціях</span>

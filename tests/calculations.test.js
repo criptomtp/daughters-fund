@@ -6,7 +6,8 @@ import {
   accountSummary,
   goalProgress,
   convertCurrency,
-  beneficiaryShare,
+  pocketShare,
+  personShareValue,
   generateCouponSchedule,
   accruedInterest,
   maturityLadder,
@@ -95,17 +96,59 @@ describe("convertCurrency", () => {
   });
 });
 
-describe("beneficiaryShare", () => {
-  it("equal split with no weights", () => {
-    expect(beneficiaryShare({ beneficiaryIds: ["a", "b"] }, "a")).toBeCloseTo(0.5, 10);
+describe("pocketShare", () => {
+  it("рівні ваги — рівні частки", () => {
+    expect(pocketShare({ memberWeights: { a: 1, b: 1 } }, "a")).toBeCloseTo(0.5, 10);
   });
-  it("explicit 60/40 weights", () => {
-    const acc = { beneficiaryIds: ["a", "b"], beneficiaryWeights: { a: 60, b: 40 } };
-    expect(beneficiaryShare(acc, "a")).toBeCloseTo(0.6, 10);
-    expect(beneficiaryShare(acc, "b")).toBeCloseTo(0.4, 10);
+  it("явні ваги 60/40", () => {
+    const pk = { memberWeights: { a: 60, b: 40 } };
+    expect(pocketShare(pk, "a")).toBeCloseTo(0.6, 10);
+    expect(pocketShare(pk, "b")).toBeCloseTo(0.4, 10);
   });
-  it("falls back to equal when weights sum to zero", () => {
-    expect(beneficiaryShare({ beneficiaryIds: ["a", "b"], beneficiaryWeights: { a: 0, b: 0 } }, "a")).toBeCloseTo(0.5, 10);
+  it("чужа особа отримує нуль", () => {
+    expect(pocketShare({ memberWeights: { a: 1 } }, "b")).toBe(0);
+  });
+  it("порожня кишеня не ділить на нуль", () => {
+    expect(pocketShare({ memberWeights: {} }, "a")).toBe(0);
+    expect(pocketShare({ memberWeights: { a: 0 } }, "a")).toBe(0);
+    expect(pocketShare(null, "a")).toBe(0);
+    expect(pocketShare(undefined, "a")).toBe(0);
+  });
+});
+
+describe("подвійне ділення — помилка, що виглядає правдоподібно", () => {
+  // Один рахунок, дві кишені по лоту на 10 000 ₴. Донька — єдина учасниця
+  // своєї кишені, тож її частка 10 000. Якщо десь лишиться множення на
+  // частку РАХУНКУ (де вона одна з двох), вийде 5 000 — число, схоже на
+  // правду, і саме тому помилку не помітили б на екрані.
+  const bondsByIsin = new Map([["X", { currency: "UAH", faceValue: 1000 }]]);
+  const lots = [
+    { id: "l1", isin: "X", accountId: "a1", pocketId: "kids", quantity: 10, purchasePrice: 1000 },
+    { id: "l2", isin: "X", accountId: "a1", pocketId: "mine", quantity: 10, purchasePrice: 1000 },
+  ];
+  const pockets = [
+    { id: "kids", memberWeights: { kid: 1 } },
+    { id: "mine", memberWeights: { dad: 1 } },
+  ];
+  const asOfDate = "2026-01-01T00:00:00.000Z";
+
+  it("personShareValue не ділить удруге", () => {
+    const v = personShareValue({ person: { id: "kid" }, pockets, lots, bondsByIsin, asOfDate });
+    expect(v).toBeCloseTo(10000, 2);
+  });
+
+  it("goalProgress не ділить удруге", () => {
+    const g = goalProgress({
+      person: { id: "kid", birthDate: "2020-01-01", targetAmount: 100000, targetCurrency: "UAH" },
+      pockets, lots, bondsByIsin, asOfDate,
+    });
+    expect(g.currentValue).toBeCloseTo(10000, 2);
+  });
+
+  it("дві доньки в одній кишені ділять її навпіл", () => {
+    const shared = [{ id: "kids", memberWeights: { kid: 1, kid2: 1 } }, pockets[1]];
+    const v = personShareValue({ person: { id: "kid" }, pockets: shared, lots, bondsByIsin, asOfDate });
+    expect(v).toBeCloseTo(5000, 2);
   });
 });
 
@@ -125,35 +168,35 @@ describe("accountSummary", () => {
 describe("goalProgress", () => {
   const base = {
     person: { id: "p1", birthDate: "2020-01-01", targetAmount: 100000, targetCurrency: "UAH" },
-    accounts: [{ id: "a1", beneficiaryIds: ["p1"] }],
+    pockets: [{ id: "pk1", memberWeights: { p1: 1 } }],
     lots: [],
     bondsByIsin: new Map(),
-    cashByAccount: new Map([["a1", { UAH: 40000 }]]),
+    cashByPocket: new Map([["pk1", { UAH: 40000 }]]),
   };
 
   it("counts same-currency cash toward the goal", () => {
     expect(goalProgress(base).currentValue).toBeCloseTo(40000, 2);
   });
   it("converts other-currency cash when fxRates are supplied", () => {
-    const g = goalProgress({ ...base, cashByAccount: new Map([["a1", { USD: 100 }]]), fxRates: { UAH: 50, USD: 1.1, EUR: 1 } });
+    const g = goalProgress({ ...base, cashByPocket: new Map([["pk1", { USD: 100 }]]), fxRates: { UAH: 50, USD: 1.1, EUR: 1 } });
     expect(g.currentValue).toBeCloseTo(4545.45, 1); // 100 USD = 90.91 EUR = 4545.45 UAH
   });
   it("drops other-currency cash without rates (backward compatible)", () => {
-    const g = goalProgress({ ...base, cashByAccount: new Map([["a1", { USD: 100 }]]) });
+    const g = goalProgress({ ...base, cashByPocket: new Map([["pk1", { USD: 100 }]]) });
     expect(g.currentValue).toBe(0);
   });
-  it("splits a shared account by explicit weights", () => {
+  it("ділить кишеню за явними вагами", () => {
     const g = goalProgress({
       person: { id: "p1", birthDate: "2020-01-01", targetAmount: 100000, targetCurrency: "UAH" },
-      accounts: [{ id: "a1", beneficiaryIds: ["p1", "p2"], beneficiaryWeights: { p1: 70, p2: 30 } }],
+      pockets: [{ id: "pk1", memberWeights: { p1: 70, p2: 30 } }],
       lots: [],
       bondsByIsin: new Map(),
-      cashByAccount: new Map([["a1", { UAH: 10000 }]]),
+      cashByPocket: new Map([["pk1", { UAH: 10000 }]]),
     });
     expect(g.currentValue).toBeCloseTo(7000, 2);
   });
   it("flags deadlineReached past 18 with a remaining gap", () => {
-    const g = goalProgress({ ...base, person: { ...base.person, birthDate: "2000-01-01" }, cashByAccount: new Map() });
+    const g = goalProgress({ ...base, person: { ...base.person, birthDate: "2000-01-01" }, cashByPocket: new Map() });
     expect(g.deadlineReached).toBe(true);
     expect(g.requiredMonthly).toBe(0);
   });

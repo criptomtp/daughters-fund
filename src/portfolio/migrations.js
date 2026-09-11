@@ -1,4 +1,4 @@
-import { SCHEMA_VERSION } from "./db.js";
+import { SCHEMA_VERSION, planPockets } from "./db.js";
 
 export const MIGRATIONS = {
   // v1 → v2: Owner розщеплено на Person + Account, додано Broker
@@ -167,6 +167,22 @@ export const MIGRATIONS = {
       })),
     },
   }),
+
+  // v6 → v7: власність переїхала з рахунку на лот. Той самий planPockets,
+  // що й у Dexie-апгрейді — два шляхи не мають розійтися.
+  6: (payload) => {
+    const next = planPockets({
+      persons: payload.data.persons || [],
+      accounts: payload.data.accounts || [],
+      lots: payload.data.lots || [],
+      cashTransactions: payload.data.cashTransactions || [],
+    });
+    return {
+      ...payload,
+      schemaVersion: 7,
+      data: { ...payload.data, ...next },
+    };
+  },
 };
 
 function isObject(x) { return x && typeof x === "object" && !Array.isArray(x); }
@@ -185,7 +201,7 @@ function validatePayload(payload) {
   if (!isObject(payload.data))  throw new Error("Бекап не містить поля data");
   if (typeof payload.schemaVersion !== "number") throw new Error("Бекап не містить schemaVersion");
 
-  const arrays = ["persons", "brokers", "accounts", "bondReferences", "lots", "couponPayments", "cashTransactions", "snapshots", "owners"];
+  const arrays = ["persons", "brokers", "accounts", "pockets", "bondReferences", "lots", "couponPayments", "cashTransactions", "snapshots", "owners"];
   for (const field of arrays) {
     const arr = payload.data[field];
     if (arr != null && !Array.isArray(arr)) {

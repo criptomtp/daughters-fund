@@ -3,7 +3,7 @@ import { Modal } from "./Modal.jsx";
 import { CURRENCIES } from "./taxRules.js";
 
 // Універсальна форма для готівкових операцій: deposit / withdraw / transfer
-export function CashOpForm({ mode, accounts, brokersById, defaultAccountId, onSubmit, onCancel }) {
+export function CashOpForm({ mode, accounts, pockets = [], brokersById, defaultAccountId, defaultPocketId, onSubmit, onCancel }) {
   const isTransfer = mode === "transfer";
   const isDeposit  = mode === "deposit";
 
@@ -17,6 +17,7 @@ export function CashOpForm({ mode, accounts, brokersById, defaultAccountId, onSu
   const [currency, setCurrency] = useState(defaultAcc?.primaryCurrency || "UAH");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState("");
+  const [pocketId, setPocketId] = useState(defaultPocketId || pockets[0]?.id || "");
 
   const title = isTransfer ? "Переказ між рахунками"
               : isDeposit  ? "Поповнення рахунку"
@@ -26,19 +27,28 @@ export function CashOpForm({ mode, accounts, brokersById, defaultAccountId, onSu
     const num = Number(amount);
     if (!Number.isFinite(num) || num <= 0) return;
     if (isTransfer) {
-      await onSubmit({ fromAccountId: accountId, toAccountId, amount: num, currency, date, notes });
+      await onSubmit({ fromAccountId: accountId, toAccountId, pocketId, amount: num, currency, date, notes });
     } else {
-      await onSubmit({ accountId, amount: num, currency, date, notes });
+      await onSubmit({ accountId, pocketId, amount: num, currency, date, notes });
     }
   };
 
-  const canSubmit = Number(amount) > 0 && accountId && (!isTransfer || (toAccountId && toAccountId !== accountId));
+  const canSubmit = Number(amount) > 0 && accountId && pocketId &&
+    (!isTransfer || (toAccountId && toAccountId !== accountId));
 
   return (
     <Modal onClose={onCancel} ariaLabel={title}>
       <h3 className="modal-title">{title}</h3>
 
       <div className="form-grid">
+        {pockets.length > 1 && (
+          <label className="form-field form-field--full">
+            <span className="form-label">Чиї гроші<span className="req">*</span></span>
+            <select className="form-input" value={pocketId} onChange={e => setPocketId(e.target.value)}>
+              {pockets.map(pk => <option key={pk.id} value={pk.id}>{pk.emoji} {pk.name}</option>)}
+            </select>
+          </label>
+        )}
         <label className="form-field form-field--full">
           <span className="form-label">{isTransfer ? "З рахунку" : "Рахунок"}<span className="req">*</span></span>
           <select className="form-input" value={accountId} onChange={e => setAccountId(e.target.value)}>

@@ -4,7 +4,8 @@ import { useLots } from "./hooks/useLots.js";
 import { useBonds } from "./hooks/useBonds.js";
 import { useAccounts } from "./hooks/useAccounts.js";
 import { usePersons } from "./hooks/usePersons.js";
-import { groupCouponsByMonth, beneficiaryShare } from "./calculations.js";
+import { usePockets } from "./hooks/usePockets.js";
+import { groupCouponsByMonth, pocketShare } from "./calculations.js";
 import { MarkReceivedModal } from "./MarkReceivedModal.jsx";
 
 const MONTH_NAMES = [
@@ -45,6 +46,7 @@ export function CouponCalendar({ accountFilter }) {
   const { list: bonds } = useBonds();
   const { list: accounts } = useAccounts();
   const { list: persons } = usePersons();
+  const { list: pockets } = usePockets();
 
   const [confirmingCoupon, setConfirmingCoupon] = useState(null);
   const [opErr, setOpErr] = useState(null);
@@ -53,6 +55,7 @@ export function CouponCalendar({ accountFilter }) {
   const bondsByIsin  = useMemo(() => new Map(bonds.map(b => [b.isin, b])), [bonds]);
   const accountsById = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts]);
   const personsById  = useMemo(() => new Map(persons.map(p => [p.id, p])), [persons]);
+  const pocketsById  = useMemo(() => new Map(pockets.map(p => [p.id, p])), [pockets]);
 
   const groups = useMemo(() => groupCouponsByMonth(coupons), [coupons]);
 
@@ -118,12 +121,15 @@ export function CouponCalendar({ accountFilter }) {
                 const lot = lotsById.get(c.lotId);
                 const bond = lot && bondsByIsin.get(lot.isin);
                 const account = lot && accountsById.get(lot.accountId);
-                const beneficiaries = account
-                  ? (account.beneficiaryIds || []).map(id => personsById.get(id)).filter(Boolean)
+                // Виплата належить кишені свого лоту, а не рахунку: на одному
+                // рахунку в ту саму дату можуть гаситись папери обох сторін.
+                const pocket = lot && pocketsById.get(lot.pocketId);
+                const members = pocket
+                  ? Object.keys(pocket.memberWeights || {}).map(id => personsById.get(id)).filter(Boolean)
                   : [];
                 const dayStr = c.scheduledDate.slice(8, 10);
                 const isReceived = c.status === "received";
-                const isShared = account?.kind === "shared" && beneficiaries.length > 1;
+                const isShared = members.length > 1;
 
                 const kindLabel = c.kind === "redemption"
                   ? "Погашення"
@@ -138,11 +144,12 @@ export function CouponCalendar({ accountFilter }) {
                     <span className="cal-owner">
                       <span className="cal-kind-badge">{kindLabel}</span>
                       {" "}{account?.emoji} {account?.name || "—"}
+                      {pocket && <span className="cal-pocket"> · {pocket.name}</span>}
                       {isShared && (
                         <span className="cal-share">
-                          {" → "}{beneficiaries.map((p, i) => (
+                          {" → "}{members.map((p, i) => (
                             <span key={p.id} style={{ color: p.color }}>
-                              {i > 0 && " · "}{p.name} {fmt((c.amountNet || 0) * beneficiaryShare(account, p.id), bond?.currency)}
+                              {i > 0 && " · "}{p.name} {fmt((c.amountNet || 0) * pocketShare(pocket, p.id), bond?.currency)}
                             </span>
                           ))}
                         </span>

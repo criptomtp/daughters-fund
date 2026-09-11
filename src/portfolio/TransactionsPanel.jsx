@@ -3,6 +3,7 @@ import { useTransactions } from "./hooks/useTransactions.js";
 import { useAccounts } from "./hooks/useAccounts.js";
 import { useBrokers } from "./hooks/useBrokers.js";
 import { CashOpForm } from "./CashOpForm.jsx";
+import { usePockets } from "./hooks/usePockets.js";
 import { CASH_KINDS } from "./repository.js";
 
 const CURRENCY_SYMBOL = { UAH: "₴", USD: "$", EUR: "€" };
@@ -27,13 +28,14 @@ const KIND_COLORS = {
   manual:          "var(--ink-mute)",
 };
 
-export function TransactionsPanel({ accountFilter }) {
+export function TransactionsPanel({ accountFilter, pocket }) {
   const { list: txs, loading, deposit, withdraw, transfer, remove } = useTransactions({
     accountId: accountFilter === "all" ? undefined : accountFilter,
     limit: 200,
   });
   const { list: accounts } = useAccounts();
   const { list: brokers } = useBrokers();
+  const { list: pockets } = usePockets();
   const [modalMode, setModalMode] = useState(null); // null | 'deposit' | 'withdraw' | 'transfer'
   const [opErr, setOpErr] = useState(null);
 
@@ -107,8 +109,10 @@ export function TransactionsPanel({ accountFilter }) {
         <CashOpForm
           mode={modalMode}
           accounts={accounts}
+          pockets={pockets}
           brokersById={brokersById}
           defaultAccountId={accountFilter === "all" ? null : accountFilter}
+          defaultPocketId={pocket?.id || null}
           onSubmit={handleSubmit}
           onCancel={() => setModalMode(null)}
         />

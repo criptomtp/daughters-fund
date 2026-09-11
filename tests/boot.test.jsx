@@ -39,7 +39,7 @@ describe("застосунок монтується", () => {
 // Регресія: біржовий рахунок не має тягнути облігації.
 describe("біржовий рахунок ведеться монетами, не облігаціями", () => {
   it("cryptoBuy додає монети до залишку і списує гривню", async () => {
-    const { accounts, brokers, persons, transactions } = await import("../src/portfolio/repository.js");
+    const { accounts, brokers, persons, pockets, transactions } = await import("../src/portfolio/repository.js");
     const br = await brokers.add({ name: "WhiteBit" });
     const p1 = await persons.add({ name: "A" });
     const p2 = await persons.add({ name: "B" });
@@ -47,10 +47,11 @@ describe("біржовий рахунок ведеться монетами, н�
       name: "WhiteBit", brokerId: br.id, kind: "exchange",
       beneficiaryIds: [p1.id, p2.id],
     });
+    const pk = await pockets.add({ name: "Доньки", memberWeights: { [p1.id]: 1, [p2.id]: 1 } });
 
-    await transactions.deposit({ accountId: acc.id, amount: 5000, currency: "UAH", date: "2026-09-05" });
+    await transactions.deposit({ accountId: acc.id, pocketId: pk.id, amount: 5000, currency: "UAH", date: "2026-09-05" });
     await transactions.cryptoBuy({
-      accountId: acc.id, amount: 5000, ticker: "BTC",
+      accountId: acc.id, pocketId: pk.id, amount: 5000, ticker: "BTC",
       coinAmount: 0.00185, currency: "UAH", date: "2026-09-05",
     });
 
@@ -84,17 +85,18 @@ describe("біржовий рахунок ведеться монетами, н�
       name: "ICU-тест", brokerId: br.id, kind: "personal", beneficiaryIds: [p1.id],
     });
     await expect(
-      transactions.cryptoBuy({ accountId: acc.id, amount: 100, ticker: "BTC", coinAmount: 0.001 })
+      transactions.cryptoBuy({ accountId: acc.id, amount: 100, ticker: "BTC", coinAmount: 0.001, pocketId: "any" })
     ).rejects.toThrow("Це не біржовий рахунок");
   });
 });
 
 describe("закриття лоту", () => {
   async function setup() {
-    const { accounts, brokers, persons, bonds, lots, transactions } = await import("../src/portfolio/repository.js");
+    const { accounts, brokers, persons, pockets, bonds, lots, transactions } = await import("../src/portfolio/repository.js");
     const br = await brokers.add({ name: "B" + Math.random() });
     const p = await persons.add({ name: "P" + Math.random() });
     const acc = await accounts.add({ name: "A" + Math.random(), brokerId: br.id, kind: "personal", beneficiaryIds: [p.id] });
+    const pocket = await pockets.add({ name: "P" + Math.random(), memberWeights: { [p.id]: 1 } });
     const isin = "UA400000" + String(Math.floor(Math.random() * 9000) + 1000);
     await bonds.add({
       isin, ticker: "T", type: "ovdp", currency: "UAH", faceValue: 1000,
@@ -105,12 +107,13 @@ describe("закриття лоту", () => {
         { date: "2027-01-01", amountPerPiece: 1080, kind: "coupon+redemption" },
       ],
     });
-    await transactions.deposit({ accountId: acc.id, amount: 20000, currency: "UAH", date: "2026-01-10" });
+    await transactions.deposit({ accountId: acc.id, pocketId: pocket.id, amount: 20000, currency: "UAH", date: "2026-01-10" });
     const lot = await lots.add({
-      isin, accountId: acc.id, purchaseDate: "2026-01-10", quantity: 10,
+      isin, accountId: acc.id, pocketId: pocket.id,
+      purchaseDate: "2026-01-10", quantity: 10,
       purchasePrice: 1000, accruedInterestPerPiece: 0, commission: 0,
     });
-    return { acc, lot, isin };
+    return { acc, lot, isin, pocket };
   }
 
   it("підтвердження погашення закриває лот і прибирає його з вартості", async () => {
@@ -168,5 +171,262 @@ describe("закриття лоту", () => {
     const { lot } = await setup();
     await lots.sell(lot.id, { date: "2026-03-01", amount: 10500 });
     await expect(lots.sell(lot.id, { date: "2026-04-01", amount: 1 })).rejects.toThrow("уже закритий");
+  });
+});
+
+describe("кишені власників на одному рахунку", () => {
+  async function twoPockets() {
+    const { accounts, brokers, persons, pockets, bonds, lots, transactions } =
+      await import("../src/portfolio/repository.js");
+    const br = await brokers.add({ name: "ICU" + Math.random() });
+    const kid = await persons.add({ name: "K" + Math.random(), type: "child" });
+    const dad = await persons.add({ name: "D" + Math.random(), type: "parent" });
+    const acc = await accounts.add({
+      name: "ICU" + Math.random(), brokerId: br.id, kind: "personal",
+      beneficiaryIds: [kid.id],
+    });
+    const kids = await pockets.add({ name: "Доньки" + Math.random(), memberWeights: { [kid.id]: 1 } });
+    const mine = await pockets.add({ name: "Я" + Math.random(), memberWeights: { [dad.id]: 1 } });
+
+    const isin = "UA400001" + String(Math.floor(Math.random() * 9000) + 1000);
+    await bonds.add({
+      isin, ticker: "T", type: "ovdp", currency: "UAH", faceValue: 1000,
+      couponRate: 16, couponFrequency: 1,
+      issueDate: "2026-01-01", maturityDate: "2027-01-01",
+      customSchedule: [{ date: "2027-01-01", amountPerPiece: 1080, kind: "coupon+redemption" }],
+    });
+
+    await transactions.deposit({ accountId: acc.id, pocketId: kids.id, amount: 50000, currency: "UAH", date: "2026-01-02" });
+    await transactions.deposit({ accountId: acc.id, pocketId: mine.id, amount: 50000, currency: "UAH", date: "2026-01-02" });
+
+    const base = { isin, accountId: acc.id, purchaseDate: "2026-01-10", purchasePrice: 1000, accruedInterestPerPiece: 0, commission: 0 };
+    const kidLot  = await lots.add({ ...base, pocketId: kids.id, quantity: 6 });
+    const myLot   = await lots.add({ ...base, pocketId: mine.id, quantity: 4 });
+    return { acc, kids, mine, kidLot, myLot, isin };
+  }
+
+  it("погашення в один день ділиться між кишенями за кількістю", async () => {
+    const { coupons } = await import("../src/portfolio/repository.js");
+    const { db } = await import("../src/portfolio/db.js");
+    const { acc, kids, mine, kidLot, myLot } = await twoPockets();
+
+    const forLot = async (id) =>
+      (await db.couponPayments.where("lotId").equals(id).toArray())
+        .find(c => c.kind === "coupon+redemption");
+    const a = await forLot(kidLot.id);
+    const b = await forLot(myLot.id);
+    expect(a.scheduledDate).toBe(b.scheduledDate);   // один день — одна подія
+
+    await coupons.markGroupReceived([a.id, b.id], {
+      actualDate: "2027-01-01", actualAmount: 10800, accountId: acc.id,
+    });
+
+    const cash = await db.cashTransactions.where("accountId").equals(acc.id).toArray();
+    const red = cash.filter(t => t.kind === "lot_redemption");
+    const byPocket = (id) => red.filter(t => t.pocketId === id).reduce((s, t) => s + t.amount, 0);
+
+    expect(byPocket(kids.id)).toBeCloseTo(6480, 2);   // 6 з 10 шт
+    expect(byPocket(mine.id)).toBeCloseTo(4320, 2);   // 4 з 10 шт
+    expect(byPocket(kids.id) + byPocket(mine.id)).toBeCloseTo(10800, 2);
+  });
+
+  it("копійки округлення не губляться між кишенями", async () => {
+    const { coupons } = await import("../src/portfolio/repository.js");
+    const { db } = await import("../src/portfolio/db.js");
+    const { acc, kidLot, myLot } = await twoPockets();
+    const forLot = async (id) =>
+      (await db.couponPayments.where("lotId").equals(id).toArray())
+        .find(c => c.kind === "coupon+redemption");
+
+    // Сума, що не ділиться націло у пропорції 6:4
+    await coupons.markGroupReceived([(await forLot(kidLot.id)).id, (await forLot(myLot.id)).id], {
+      actualDate: "2027-01-01", actualAmount: 10800.01, accountId: acc.id,
+    });
+
+    const red = (await db.cashTransactions.where("accountId").equals(acc.id).toArray())
+      .filter(t => t.kind === "lot_redemption");
+    const total = red.reduce((s, t) => s + t.amount, 0);
+    expect(Math.round(total * 100) / 100).toBe(10800.01);
+  });
+
+  it("баланс рахунку рахується окремо по кишенях", async () => {
+    const { transactions } = await import("../src/portfolio/repository.js");
+    const { acc, kids, mine } = await twoPockets();
+
+    const kidsBal = await transactions.balanceByCurrency(acc.id, null, kids.id);
+    const mineBal = await transactions.balanceByCurrency(acc.id, null, mine.id);
+    const total   = await transactions.balanceByCurrency(acc.id);
+
+    expect(kidsBal.UAH).toBeCloseTo(50000 - 6000, 2);
+    expect(mineBal.UAH).toBeCloseTo(50000 - 4000, 2);
+    expect(total.UAH).toBeCloseTo(kidsBal.UAH + mineBal.UAH, 2);
+  });
+
+  it("переказ між кишенями не змінює загальний залишок рахунку", async () => {
+    const { transactions } = await import("../src/portfolio/repository.js");
+    const { acc, kids, mine } = await twoPockets();
+    const before = (await transactions.balanceByCurrency(acc.id)).UAH;
+
+    await transactions.pocketTransfer({
+      accountId: acc.id, fromPocketId: kids.id, toPocketId: mine.id,
+      amount: 1133.84, currency: "UAH", date: "2026-09-18",
+    });
+
+    const kidsBal = (await transactions.balanceByCurrency(acc.id, null, kids.id)).UAH;
+    const mineBal = (await transactions.balanceByCurrency(acc.id, null, mine.id)).UAH;
+    const after   = (await transactions.balanceByCurrency(acc.id)).UAH;
+
+    expect(after).toBeCloseTo(before, 2);
+    expect(kidsBal).toBeCloseTo(50000 - 6000 - 1133.84, 2);
+    expect(mineBal).toBeCloseTo(50000 - 4000 + 1133.84, 2);
+  });
+
+  it("кишеня без учасників не створюється", async () => {
+    const { pockets } = await import("../src/portfolio/repository.js");
+    await expect(pockets.add({ name: "Порожня", memberWeights: {} }))
+      .rejects.toThrow("щонайменше одного учасника");
+    await expect(pockets.add({ name: "Нулі", memberWeights: { x: 0 } }))
+      .rejects.toThrow("щонайменше одного учасника");
+  });
+
+  it("кишеню, на яку є посилання, видалити не можна", async () => {
+    const { pockets } = await import("../src/portfolio/repository.js");
+    const { kids } = await twoPockets();
+    await expect(pockets.remove(kids.id)).rejects.toThrow("використовується");
+  });
+});
+
+describe("поділ лоту між кишенями", () => {
+  async function oneLot(commission = 0) {
+    const { accounts, brokers, persons, pockets, bonds, lots, transactions } =
+      await import("../src/portfolio/repository.js");
+    const br = await brokers.add({ name: "B" + Math.random() });
+    const kid = await persons.add({ name: "K" + Math.random(), type: "child" });
+    const dad = await persons.add({ name: "D" + Math.random(), type: "parent" });
+    const acc = await accounts.add({
+      name: "A" + Math.random(), brokerId: br.id, kind: "personal", beneficiaryIds: [kid.id],
+    });
+    const kids = await pockets.add({ name: "K" + Math.random(), memberWeights: { [kid.id]: 1 } });
+    const mine = await pockets.add({ name: "M" + Math.random(), memberWeights: { [dad.id]: 1 } });
+
+    const isin = "UA400002" + String(Math.floor(Math.random() * 9000) + 1000);
+    await bonds.add({
+      isin, ticker: "T", type: "ovdp", currency: "UAH", faceValue: 1000,
+      couponRate: 16, couponFrequency: 1,
+      issueDate: "2026-01-01", maturityDate: "2027-01-01",
+      customSchedule: [{ date: "2027-01-01", amountPerPiece: 1080, kind: "coupon+redemption" }],
+    });
+    await transactions.deposit({ accountId: acc.id, pocketId: kids.id, amount: 20000, currency: "UAH", date: "2026-01-02" });
+    const lot = await lots.add({
+      isin, accountId: acc.id, pocketId: kids.id, purchaseDate: "2026-01-10",
+      quantity: 10, purchasePrice: 1000, accruedInterestPerPiece: 5, commission,
+    });
+    return { acc, kids, mine, lot, isin };
+  }
+
+  it("ділить у межах одного рахунку — раніше це було заборонено", async () => {
+    const { lots } = await import("../src/portfolio/repository.js");
+    const { acc, kids, mine, lot } = await oneLot();
+
+    const { newLot } = await lots.split({ lotId: lot.id, quantityForNew: 4, newPocketId: mine.id });
+
+    expect(newLot.accountId).toBe(acc.id);          // рахунок той самий
+    expect(newLot.pocketId).toBe(mine.id);
+    expect(newLot.quantity).toBe(4);
+    const old = await lots.get(lot.id);
+    expect(old.quantity).toBe(6);
+    expect(old.pocketId).toBe(kids.id);
+  });
+
+  it("поділ без зміни рахунку й кишені не має сенсу і не проходить", async () => {
+    const { lots } = await import("../src/portfolio/repository.js");
+    const { lot } = await oneLot();
+    await expect(lots.split({ lotId: lot.id, quantityForNew: 4 }))
+      .rejects.toThrow("Має змінитися рахунок або кишеня");
+  });
+
+  it("баланс не змінюється ні при поділі, ні при редагуванні половин", async () => {
+    const { lots, transactions } = await import("../src/portfolio/repository.js");
+    const { acc, mine, lot } = await oneLot(37.5);
+
+    const before = (await transactions.balanceByCurrency(acc.id)).UAH;
+    const { newLot } = await lots.split({ lotId: lot.id, quantityForNew: 4, newPocketId: mine.id });
+
+    const afterSplit = (await transactions.balanceByCurrency(acc.id)).UAH;
+    expect(afterSplit).toBeCloseTo(before, 2);
+
+    // Саме тут ламалось раніше: у нового лоту транзакція мала суму 0, і перше
+    // ж редагування переписувало її на повну — з рахунку списувалось те,
+    // чого ніколи не витрачали.
+    await lots.update(newLot.id, { notes: "правка" });
+    expect((await transactions.balanceByCurrency(acc.id)).UAH).toBeCloseTo(before, 2);
+
+    await lots.update(lot.id, { notes: "правка" });
+    expect((await transactions.balanceByCurrency(acc.id)).UAH).toBeCloseTo(before, 2);
+  });
+
+  it("сума вкладеного в дві половини дорівнює вкладеному в цілий лот", async () => {
+    const { lots } = await import("../src/portfolio/repository.js");
+    const { lotInvested } = await import("../src/portfolio/calculations.js");
+    const { mine, lot } = await oneLot(37.5);
+
+    const wholeInvested = lotInvested(lot);
+    const { newLot } = await lots.split({ lotId: lot.id, quantityForNew: 4, newPocketId: mine.id });
+    const old = await lots.get(lot.id);
+
+    expect(lotInvested(old) + lotInvested(newLot)).toBeCloseTo(wholeInvested, 2);
+  });
+});
+
+describe("бекап переживає кишені", () => {
+  it("експорт → імпорт зберігає кишені, ваги й належність лотів", async () => {
+    const { backup } = await import("../src/portfolio/repository.js");
+    const { db } = await import("../src/portfolio/db.js");
+
+    // Бекап старої версії: кишень у ньому ще немає взагалі.
+    const v6 = {
+      schemaVersion: 6,
+      exportedAt: "2026-09-11T00:00:00.000Z",
+      data: {
+        persons: [
+          { id: "c1", name: "Донька 1", type: "child" },
+          { id: "c2", name: "Донька 2", type: "child" },
+        ],
+        brokers: [{ id: "br1", name: "ICU" }],
+        accounts: [{ id: "a1", name: "ICU", kind: "shared", brokerId: "br1", beneficiaryIds: ["c1", "c2"] }],
+        bondReferences: [{
+          isin: "UA4000009999", ticker: "T", type: "ovdp", currency: "UAH", faceValue: 1000,
+          couponRate: 16, couponFrequency: 1, issueDate: "2026-01-01", maturityDate: "2027-01-01",
+        }],
+        lots: [{ id: "l1", isin: "UA4000009999", accountId: "a1", quantity: 5,
+                 purchasePrice: 1000, purchaseDate: "2026-01-10", closedAt: null }],
+        couponPayments: [],
+        cashTransactions: [{ id: "t1", accountId: "a1", date: "2026-01-02",
+                             kind: "deposit", amount: 10000, currency: "UAH" }],
+        snapshots: [],
+      },
+    };
+
+    await backup.importAll(v6);
+
+    const pockets = await db.pockets.toArray();
+    expect(pockets.length).toBe(2);
+    const kids = pockets.find(p => p.name === "Доньки");
+    expect(kids.memberWeights).toEqual({ c1: 1, c2: 1 });
+    expect((await db.lots.get("l1")).pocketId).toBe(kids.id);
+    expect((await db.cashTransactions.get("t1")).pocketId).toBe(kids.id);
+
+    // А тепер найважливіше: чи виїдуть кишені назад у файл. Раніше
+    // exportAll/importAll були двома явними переліками таблиць, тож нова
+    // таблиця мовчки випадала б з кожного експорту.
+    const out = await backup.exportAll();
+    expect(Array.isArray(out.data.pockets)).toBe(true);
+    expect(out.data.pockets.length).toBe(2);
+    expect(out.data.pockets.find(p => p.name === "Доньки").memberWeights).toEqual({ c1: 1, c2: 1 });
+
+    // Друге коло: імпорт уже мігрованого файлу нічого не ламає і не дублює.
+    await backup.importAll(out);
+    expect((await db.pockets.toArray()).length).toBe(2);
+    expect((await db.lots.get("l1")).pocketId).toBe(kids.id);
   });
 });

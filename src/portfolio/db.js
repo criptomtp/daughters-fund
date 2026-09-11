@@ -1,6 +1,6 @@
 import Dexie from "dexie";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 class PortfolioDB extends Dexie {
   constructor() {
@@ -203,7 +203,98 @@ class PortfolioDB extends Dexie {
         if (lot.closedAt === undefined) await lots.put({ ...lot, closedAt: null, closedReason: null });
       }
     });
+
+    // v7 — кишені власників. Досі власність жила на рахунку: beneficiaryIds
+    // множили ВСЮ вартість рахунку на частку особи. Сказати «оці п'ять паперів
+    // мої, а решта дитячі» не було чим. Тепер власник — властивість лоту й
+    // касової операції, а рахунок лишається тим, чим є фізично: рахунком
+    // у брокера, на якому можуть лежати гроші обох сторін.
+    this.version(7).stores({
+      persons:  "id, type, name",
+      brokers:  "id, name",
+      accounts: "id, kind, brokerId, name",
+      pockets:  "id, name",
+      bondReferences: "isin, type, currency, maturityDate",
+      lots: "id, isin, accountId, pocketId, purchaseDate, closedAt, [accountId+isin], [pocketId+isin]",
+      couponPayments: "id, lotId, scheduledDate, status, [lotId+scheduledDate]",
+      cashTransactions: "id, accountId, pocketId, date, kind, currency, [accountId+date], [accountId+currency], [pocketId+date], [refId+refType]",
+      snapshots: "date",
+    }).upgrade(async tx => {
+      if ((await tx.table("pockets").count()) > 0) return;   // повтор не псує
+      const next = planPockets({
+        persons: await tx.table("persons").toArray(),
+        accounts: await tx.table("accounts").toArray(),
+        lots: await tx.table("lots").toArray(),
+        cashTransactions: await tx.table("cashTransactions").toArray(),
+      });
+      await tx.table("persons").bulkPut(next.persons);
+      await tx.table("pockets").bulkPut(next.pockets);
+      await tx.table("lots").bulkPut(next.lots);
+      await tx.table("cashTransactions").bulkPut(next.cashTransactions);
+    });
   }
+}
+
+/**
+ * Заводить дві кишені й розносить по них усе, що вже є.
+ *
+ * Чиста і синхронна навмисно: тим самим кодом користуються Dexie-апгрейд
+ * (асинхронний, таблиці) і міграція файлу бекапу (синхронна, масиви).
+ * Якби логіка була написана двічі, два шляхи розійшлися б — і розбіжність
+ * вилізла б рівно при відновленні з бекапу, тобто в найгірший момент.
+ *
+ * Кишеня «Я» створюється РАЗОМ з особою. Здавалося б, досить завести порожню
+ * кишеню й дочекатися, поки користувач додасть себе — але в реальних даних
+ * персон лише дві, обидві діти: seedDefaultsIfEmpty заповнює таблицю тільки
+ * коли вона порожня, а портфель імпортували поверх. Порожня кишеня дала б
+ * частку нуль і тихо ховала б усе, що в неї потрапить.
+ */
+export function planPockets({ persons = [], accounts = [], lots = [], cashTransactions = [] }) {
+  const ts = new Date().toISOString();
+
+  // Діти беруться з наявних рахунків у стабільному порядку — щоб ваги
+  // не залежали від того, як база віддала записи цього разу.
+  const childIds = [];
+  for (const acc of accounts) {
+    for (const id of acc.beneficiaryIds || []) {
+      if (!childIds.includes(id)) childIds.push(id);
+    }
+  }
+  for (const p of persons) {
+    if (p.type === "child" && !childIds.includes(p.id)) childIds.push(p.id);
+  }
+
+  const outPersons = [...persons];
+  let parent = persons.find(p => p.type === "parent");
+  if (!parent) {
+    parent = {
+      id: "person_self", name: "Я", type: "parent",
+      birthDate: null, color: "#2e4c72", emoji: "🧑", createdAt: ts,
+    };
+    outPersons.push(parent);
+  }
+
+  const kidsId = "pocket_kids";
+  const pockets = [
+    {
+      id: kidsId, name: "Доньки",
+      memberWeights: Object.fromEntries(childIds.map(id => [id, 1])),
+      color: "#1c6b47", emoji: "👧", createdAt: ts,
+    },
+    {
+      id: "pocket_self", name: "Я",
+      memberWeights: { [parent.id]: 1 },
+      color: "#2e4c72", emoji: "🧑", createdAt: ts,
+    },
+  ];
+
+  // Усе, що записано досі, велося для доньок — іншої кишені не існувало.
+  return {
+    persons: outPersons,
+    pockets,
+    lots: lots.map(l => (l.pocketId ? l : { ...l, pocketId: kidsId })),
+    cashTransactions: cashTransactions.map(t => (t.pocketId ? t : { ...t, pocketId: kidsId })),
+  };
 }
 
 export const db = new PortfolioDB();

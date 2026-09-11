@@ -149,12 +149,37 @@ function coinLedger(txs, exchangeIds, holdingsTotal, btc, fx) {
  */
 export function buildSeries({
   lots = [], bondsByIsin = new Map(), transactions = [], accounts = [],
-  btc = {}, fx = {}, from, to = iso(Date.now()), stepDays = 1,
+  btc = {}, fx = {}, from, to = iso(Date.now()), stepDays = 1, pocketId = null,
 }) {
   const exchangeIds = new Set(accounts.filter(a => a.kind === "exchange").map(a => a.id));
+
+  // Монети лежать на рахунку одним числом, без позначки власника. Частку
+  // кишені беремо з того, скільки вона витратила на купівлю крипти саме тут —
+  // те саме правило, що й у миттєвій оцінці, щоб графік і цифра над ним
+  // не розходились.
+  const coinShare = (accountId) => {
+    if (!pocketId) return 1;
+    const buys = transactions.filter(t => t.accountId === accountId && t.kind === "crypto_buy" && t.pocketId);
+    const rows = buys.length
+      ? buys
+      : transactions.filter(t => t.accountId === accountId && t.kind === "deposit" && t.pocketId);
+    let total = 0, mine = 0;
+    for (const t of rows) {
+      const v = Math.abs(Number(t.amount) || 0);
+      total += v;
+      if (t.pocketId === pocketId) mine += v;
+    }
+    return total > 0 ? mine / total : 0;
+  };
+
   const holdingsTotal = accounts
     .filter(a => a.kind === "exchange")
-    .reduce((s, a) => s + (Number(a.holdings?.BTC) || 0), 0);
+    .reduce((s, a) => s + (Number(a.holdings?.BTC) || 0) * coinShare(a.id), 0);
+
+  if (pocketId) {
+    lots = lots.filter(l => l.pocketId === pocketId);
+    transactions = transactions.filter(t => t.pocketId === pocketId);
+  }
 
   const { byDay: coinsByDay, days: buyDays } = coinLedger(transactions, exchangeIds, holdingsTotal, btc, fx);
 

@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { useLots } from "./hooks/useLots.js";
 import { useBonds } from "./hooks/useBonds.js";
 import { useAccounts } from "./hooks/useAccounts.js";
+import { usePockets } from "./hooks/usePockets.js";
 import { useBrokers } from "./hooks/useBrokers.js";
 import { lotInvested, lotYTM, lotAccruedTotal, lotXIRR } from "./calculations.js";
 import { BondForm } from "./BondForm.jsx";
@@ -38,7 +39,7 @@ function saveLastUsed(data) {
   } catch { /* ignore quota */ }
 }
 
-function emptyLotDraft(bonds, accounts) {
+function emptyLotDraft(bonds, accounts, pocketId) {
   const last = loadLastUsed();
   const accountId = (last.accountId && accounts.some(a => a.id === last.accountId))
     ? last.accountId
@@ -50,6 +51,7 @@ function emptyLotDraft(bonds, accounts) {
   return {
     isin,
     accountId,
+    pocketId: pocketId || "",
     purchaseDate: new Date().toISOString().slice(0, 10),
     quantity: 1,
     purchasePrice: selectedBond?.faceValue || 1000,
@@ -59,12 +61,13 @@ function emptyLotDraft(bonds, accounts) {
   };
 }
 
-export function LotsManager({ accountFilter }) {
+export function LotsManager({ accountFilter, pocket }) {
   const { list: lots, loading, error, add, update, remove, refresh: refreshLots } = useLots({
     accountId: accountFilter === "all" ? undefined : accountFilter,
   });
   const { list: bonds, refresh: refreshBonds } = useBonds();
   const { list: accounts } = useAccounts();
+  const { list: pockets } = usePockets();
   const { list: brokers } = useBrokers();
   const [editingLot, setEditingLot] = useState(null);
   const [creatingBond, setCreatingBond] = useState(false);
@@ -106,10 +109,10 @@ export function LotsManager({ accountFilter }) {
     } catch (e) { setOpErr(e.message); }
   };
 
-  const handleSplit = async ({ lotId, quantityForNew, newAccountId }) => {
+  const handleSplit = async ({ lotId, quantityForNew, newAccountId, newPocketId }) => {
     setOpErr(null);
     try {
-      await lotsRepo.split({ lotId, quantityForNew, newAccountId });
+      await lotsRepo.split({ lotId, quantityForNew, newAccountId, newPocketId });
       setSplittingLot(null);
       await refreshLots();
     } catch (e) { setOpErr(e.message); }
@@ -203,7 +206,7 @@ export function LotsManager({ accountFilter }) {
 
       {editingLot && (
         <LotForm
-          initial={editingLot === "new" ? emptyLotDraft(bonds, accounts) : {
+          initial={editingLot === "new" ? emptyLotDraft(bonds, accounts, pocket?.id) : {
             ...editingLot,
             purchaseDate: editingLot.purchaseDate?.slice(0, 10),
             accruedInterestPerPiece: editingLot.accruedInterestPerPiece != null
@@ -213,6 +216,7 @@ export function LotsManager({ accountFilter }) {
           isNew={editingLot === "new"}
           bonds={bonds}
           accounts={accounts}
+          pockets={pockets}
           brokers={brokers}
           brokersById={brokersById}
           onCreateBond={() => setCreatingBond(true)}
@@ -233,7 +237,8 @@ export function LotsManager({ accountFilter }) {
       {splittingLot && (
         <SplitLotForm
           lot={splittingLot}
-          accounts={accounts.filter(a => a.id !== splittingLot.accountId)}
+          accounts={accounts}
+          pockets={pockets}
           brokersById={brokersById}
           bond={bondsByIsin.get(splittingLot.isin)}
           onSubmit={handleSplit}
@@ -244,7 +249,7 @@ export function LotsManager({ accountFilter }) {
   );
 }
 
-function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCreateBond, onSubmit, onCancel }) {
+function LotForm({ initial, isNew, bonds, accounts, pockets, brokers, brokersById, onCreateBond, onSubmit, onCancel }) {
   // Initialize brokerId from initial.accountId (consistency)
   const initialBroker = useMemo(() => {
     if (initial.brokerId) return initial.brokerId;
@@ -279,7 +284,7 @@ function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCrea
   };
 
   const submit = () => {
-    if (!draft.isin || !draft.accountId || !draft.quantity) return;
+    if (!draft.isin || !draft.accountId || !draft.pocketId || !draft.quantity) return;
     onSubmit(draft);
   };
 
@@ -384,6 +389,16 @@ function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCrea
               <option value="">{draft.brokerId ? "— виберіть —" : "— спочатку оберіть брокера —"}</option>
               {filteredAccounts.map(a => (
                 <option key={a.id} value={a.id}>{a.emoji} {a.name} · {a.primaryCurrency}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="form-field">
+            <span className="form-label">Чиї гроші<span className="req">*</span></span>
+            <select className="form-input" value={draft.pocketId || ""} onChange={e => upd("pocketId", e.target.value)}>
+              <option value="">— виберіть —</option>
+              {pockets.map(pk => (
+                <option key={pk.id} value={pk.id}>{pk.emoji} {pk.name}</option>
               ))}
             </select>
           </label>
@@ -519,7 +534,7 @@ function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCrea
 
         <div className="modal-actions">
           <button className="owner-action-btn ok" onClick={submit}
-            disabled={!draft.isin || !draft.accountId || !draft.quantity}>
+            disabled={!draft.isin || !draft.accountId || !draft.pocketId || !draft.quantity}>
             {isNew ? "Зберегти покупку" : "Зберегти"}
           </button>
           <button className="owner-action-btn" onClick={onCancel}>Скасувати</button>
@@ -530,8 +545,10 @@ function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCrea
         <CashOpForm
           mode={topUpMode}
           accounts={accounts}
+          pockets={pockets}
           brokersById={brokersById}
           defaultAccountId={draft.accountId}
+          defaultPocketId={draft.pocketId}
           onSubmit={handleTopUp}
           onCancel={() => setTopUpMode(null)}
         />
@@ -540,18 +557,24 @@ function LotForm({ initial, isNew, bonds, accounts, brokers, brokersById, onCrea
   );
 }
 
-function SplitLotForm({ lot, accounts, brokersById, bond, onSubmit, onCancel }) {
+function SplitLotForm({ lot, accounts, pockets, brokersById, bond, onSubmit, onCancel }) {
   const [quantityForNew, setQuantityForNew] = useState(Math.floor(lot.quantity / 2));
-  const [newAccountId, setNewAccountId] = useState(accounts[0]?.id || "");
+  // Рахунок за замовчуванням — той самий: найчастіший поділ тепер не переносить
+  // папери кудись, а лише розділяє власність усередині одного рахунку.
+  const [newAccountId, setNewAccountId] = useState(lot.accountId);
+  const [newPocketId, setNewPocketId] = useState(
+    pockets.find(pk => pk.id !== lot.pocketId)?.id || lot.pocketId || "");
 
-  const submit = () => onSubmit({ lotId: lot.id, quantityForNew: Number(quantityForNew), newAccountId });
+  const submit = () => onSubmit({
+    lotId: lot.id, quantityForNew: Number(quantityForNew), newAccountId, newPocketId,
+  });
   const remaining = lot.quantity - quantityForNew;
   const cur = bond?.currency || "UAH";
 
   return (
     <Modal onClose={onCancel} ariaLabel="Форма лоту">
       <div>
-        <h3 className="modal-title">✂ Розщепити та перенести</h3>
+        <h3 className="modal-title">✂ Поділити лот</h3>
         <div className="modal-info">
           Лот {lot.isin} · кількість {lot.quantity} · куплено {lot.purchaseDate?.slice(0, 10)}
         </div>
@@ -563,7 +586,13 @@ function SplitLotForm({ lot, accounts, brokersById, bond, onSubmit, onCancel }) 
               onChange={e => setQuantityForNew(e.target.value)} />
           </label>
           <label className="form-field">
-            <span className="form-label">Куди (рахунок)<span className="req">*</span></span>
+            <span className="form-label">Чия частина<span className="req">*</span></span>
+            <select className="form-input" value={newPocketId} onChange={e => setNewPocketId(e.target.value)}>
+              {pockets.map(pk => <option key={pk.id} value={pk.id}>{pk.emoji} {pk.name}</option>)}
+            </select>
+          </label>
+          <label className="form-field">
+            <span className="form-label">Рахунок</span>
             <select className="form-input" value={newAccountId} onChange={e => setNewAccountId(e.target.value)}>
               {accounts.map(a => {
                 const broker = brokersById.get(a.brokerId);
@@ -577,13 +606,15 @@ function SplitLotForm({ lot, accounts, brokersById, bond, onSubmit, onCancel }) 
           </label>
         </div>
         <div className="modal-info">
-          <div>→ Новий лот: {quantityForNew} шт. на "{accounts.find(a => a.id === newAccountId)?.name}"</div>
+          <div>→ Новий лот: {quantityForNew} шт. · {pockets.find(pk => pk.id === newPocketId)?.name || "—"}
+            {newAccountId !== lot.accountId && ` · переноситься на "${accounts.find(a => a.id === newAccountId)?.name}"`}</div>
           <div>→ Залишається у поточному рахунку: {remaining} шт.</div>
           <div>→ Орієнтовно: {fmt(quantityForNew * lot.purchasePrice, cur)} виноситься, {fmt(remaining * lot.purchasePrice, cur)} залишається</div>
         </div>
         <div className="modal-actions">
           <button className="owner-action-btn ok" onClick={submit}
-            disabled={!newAccountId || quantityForNew <= 0 || quantityForNew >= lot.quantity}>
+            disabled={!newAccountId || !newPocketId || quantityForNew <= 0 || quantityForNew >= lot.quantity ||
+              (newAccountId === lot.accountId && newPocketId === lot.pocketId)}>
             Розщепити
           </button>
           <button className="owner-action-btn" onClick={onCancel}>Скасувати</button>

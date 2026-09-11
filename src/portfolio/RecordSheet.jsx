@@ -23,9 +23,14 @@ const today = () => new Date().toISOString().slice(0, 10);
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS)) || {}; } catch { return {}; } };
 const savePrefs = (p) => { try { localStorage.setItem(PREFS, JSON.stringify({ ...loadPrefs(), ...p })); } catch { /* ignore */ } };
 
-export function RecordSheet({ open, onClose, initialTab = "buy", market }) {
+export function RecordSheet({ open, onClose, initialTab = "buy", market, pocket, pockets = [] }) {
   const [tab, setTab] = useState(initialTab);
+  const [pocketId, setPocketId] = useState(null);
   if (!open) return null;
+
+  // За замовчуванням записуємо в той простір, у якому ти зараз. Міняти
+  // доводиться рідко, тож вибір показуємо лише коли кишень більше однієї.
+  const activeId = pocketId || pocket?.id || pockets[0]?.id || null;
 
   return (
     <div className="sheet-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Запис">
@@ -39,10 +44,24 @@ export function RecordSheet({ open, onClose, initialTab = "buy", market }) {
             </button>
           ))}
         </div>
+        {pockets.length > 1 && (
+          <label className="form-field pocket-pick">
+            <span className="form-label">Чиї гроші</span>
+            <div className="ph-pick">
+              {pockets.map(pk => (
+                <button key={pk.id} type="button"
+                  className={`seg-btn ${pk.id === activeId ? "active" : ""}`}
+                  onClick={() => setPocketId(pk.id)}>
+                  {pk.emoji} {pk.name}
+                </button>
+              ))}
+            </div>
+          </label>
+        )}
         <div className="sheet-body">
-          {tab === "buy" && <BuyForm onDone={onClose} market={market} />}
+          {tab === "buy" && <BuyForm onDone={onClose} market={market} pocketId={activeId} />}
           {tab === "coupon" && <CouponForm onDone={onClose} />}
-          {tab === "transfer" && <TransferForm onDone={onClose} />}
+          {tab === "transfer" && <TransferForm onDone={onClose} pocketId={activeId} pockets={pockets} />}
         </div>
       </div>
     </div>
@@ -51,7 +70,7 @@ export function RecordSheet({ open, onClose, initialTab = "buy", market }) {
 
 // ── Внесок і купівля ───────────────────────────────────────────────────────
 
-function BuyForm({ onDone, market }) {
+function BuyForm({ onDone, market, pocketId }) {
   const { list: accounts } = useAccounts();
   const { list: bonds } = useBonds();
   const prefs = useMemo(() => loadPrefs(), []);
@@ -116,19 +135,19 @@ function BuyForm({ onDone, market }) {
     try {
       if (dep > 0) {
         await txRepo.deposit({
-          accountId: effAccountId, amount: dep, currency: cur, date,
+          accountId: effAccountId, pocketId, amount: dep, currency: cur, date,
           notes: isExchange ? `Поповнення біржі $${depRaw.toFixed(2)} (курс ${fxRate})` : "Внесок",
         });
       }
       if (isExchange && coins > 0) {
         await txRepo.cryptoBuy({
-          accountId: effAccountId, amount: dep, ticker: coin,
+          accountId: effAccountId, pocketId, amount: dep, ticker: coin,
           coinAmount: coins, currency: cur, date,
         });
       }
       if (!isExchange && qty > 0 && bond) {
         await lotsRepo.add({
-          isin: effIsin, accountId: effAccountId, purchaseDate: date, quantity: qty,
+          isin: effIsin, accountId: effAccountId, pocketId, purchaseDate: date, quantity: qty,
           purchasePrice: Math.round(clean * 100) / 100,
           accruedInterestPerPiece: Math.round(accrued * 100) / 100,
           commission: 0, notes: "",
@@ -425,7 +444,7 @@ function CouponForm({ onDone }) {
 
 // ── Переказ ────────────────────────────────────────────────────────────────
 
-function TransferForm({ onDone }) {
+function TransferForm({ onDone, pocketId }) {
   const { list: accounts } = useAccounts();
   const prefs = useMemo(() => loadPrefs(), []);
   const [fromId, setFromId] = useState(prefs.transferFrom || "");
@@ -451,7 +470,7 @@ function TransferForm({ onDone }) {
     if (!canSubmit) return;
     setBusy(true); setErr(null);
     try {
-      await txRepo.transfer({ fromAccountId: effFrom, toAccountId: effTo, amount: amt, currency: cur, date, notes: "" });
+      await txRepo.transfer({ fromAccountId: effFrom, toAccountId: effTo, pocketId, amount: amt, currency: cur, date, notes: "" });
       savePrefs({ transferFrom: effFrom, transferTo: effTo });
       onDone?.();
     } catch (e) { setErr(e.message || "Не вдалося записати"); setBusy(false); }

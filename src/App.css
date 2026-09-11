@@ -632,3 +632,60 @@
   font-variant-numeric: tabular-nums;
 }
 .pos-lot .ghost-action { min-height: 34px; padding: 0 12px; font-size: 12px; }
+
+/* ── Кишені власників ─────────────────────────────────────────────────
+   Перемикач просторів стоїть над контентом усіх трьох екранів: він міняє
+   не вигляд, а те, чиї гроші ти зараз бачиш, тож має бути видно завжди. */
+
+.pocket-switch {
+  display: flex; gap: 4px;
+  padding: 4px;
+  margin: 0 0 14px;
+  background: var(--ink-900);
+  border-radius: 11px;
+}
+.pocket-tab {
+  flex: 1;
+  min-height: 36px;
+  border: 0; border-radius: 8px;
+  background: none;
+  color: var(--paper-dim);
+  font-family: inherit; font-size: 13.5px; font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pocket-tab.active {
+  background: var(--ink-700);
+  color: var(--pocket-color, var(--brass));
+  font-weight: 700;
+  box-shadow: var(--shadow-card);
+}
+.pocket-tab:focus-visible { outline: 2px solid var(--brass); outline-offset: 1px; }
+
+/* Вибір кишені в листі запису — та сама сітка, що й у сегментах. */
+.pocket-pick .ph-pick { display: flex; gap: 6px; }
+.pocket-pick .ph-pick .seg-btn {
+  flex: 1; padding: 0 10px;
+  background: var(--ink-900);
+}
+.pocket-pick .ph-pick .seg-btn.active { background: var(--ink-700); }
+
+/* Розбивка залишку рахунку — єдине місце, де простори показані разом. */
+.account-pockets {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 4px;
+  font-size: 12.5px; color: var(--ink-mute);
+}
+.account-pocket-row { display: flex; align-items: center; gap: 6px; }
+.pocket-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+
+/* Редактор учасників кишені. */
+.pocket-member {
+  display: grid; grid-template-columns: 1fr auto auto;
+  gap: 8px; align-items: center;
+  padding: 4px 0;
+}
+.pocket-member .form-input { max-width: 82px; text-align: right; }
+.ghost-action.on { color: var(--brass); font-weight: 600; }
+
+.cal-pocket { color: var(--ink-mute); font-size: 12px; }

@@ -116,6 +116,71 @@ export const persons = {
 
 // ── Accounts ────────────────────────────────────────────────────────────────
 
+/**
+ * Кишеня — іменована група власників із вагами: «Доньки» = дві доньки порівну,
+ * «Я» = одна особа. Належність до кишені живе на лоті й на касовій операції,
+ * а не на рахунку: один брокерський рахунок може містити гроші обох сторін.
+ */
+export const pockets = {
+  list: () => db.pockets.orderBy("name").toArray(),
+  get:  (id) => db.pockets.get(id),
+
+  async add({ name, memberWeights, color = "#1c6b47", emoji = "👛" }) {
+    if (!name?.trim()) throw new Error("Назва кишені обов'язкова");
+    const w = normalizeWeights(memberWeights);
+    if (!w) throw new Error("Кишеня потребує щонайменше одного учасника з вагою > 0");
+    const pocket = {
+      id: uid(), name: name.trim(), memberWeights: w,
+      color, emoji, createdAt: now(),
+    };
+    await db.pockets.add(pocket);
+    return pocket;
+  },
+
+  async update(id, patch) {
+    const existing = await db.pockets.get(id);
+    if (!existing) throw new Error("Кишеню не знайдено");
+    if (patch.memberWeights !== undefined) {
+      const w = normalizeWeights(patch.memberWeights);
+      if (!w) throw new Error("Кишеня потребує щонайменше одного учасника з вагою > 0");
+      patch = { ...patch, memberWeights: w };
+    }
+    const updated = { ...existing, ...patch };
+    await db.pockets.put(updated);
+    return updated;
+  },
+
+  async remove(id) {
+    // Порожня кишеня зробила б частку нуль, а лоти в ній — невидимими.
+    // Тому видалення можливе лише коли на неї нічого не посилається.
+    const [lotCount, txCount] = await Promise.all([
+      db.lots.where("pocketId").equals(id).count(),
+      db.cashTransactions.where("pocketId").equals(id).count(),
+    ]);
+    if (lotCount || txCount) {
+      throw new Error(`Кишеня використовується: ${lotCount} лотів, ${txCount} операцій`);
+    }
+    await db.pockets.delete(id);
+  },
+};
+
+function normalizeWeights(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const out = {};
+  for (const [personId, value] of Object.entries(raw)) {
+    const w = Number(value);
+    if (Number.isFinite(w) && w > 0) out[personId] = w;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+async function requirePocket(pocketId) {
+  if (!pocketId) throw new Error("Кишеня обов'язкова");
+  const pocket = await db.pockets.get(pocketId);
+  if (!pocket) throw new Error("Кишеню не знайдено");
+  return pocket;
+}
+
 export const accounts = {
   list: () => db.accounts.orderBy("name").toArray(),
   get:  (id) => db.accounts.get(id),
@@ -287,6 +352,8 @@ export const bonds = {
 // ── Cash Transactions ──────────────────────────────────────────────────────
 
 export const CASH_KINDS = {
+  pocket_out: "Передано іншій кишені",
+  pocket_in:  "Отримано від іншої кишені",
   deposit:         { label: "Поповнення",        sign: +1 },
   withdrawal:      { label: "Зняття",            sign: -1 },
   lot_purchase:    { label: "Купівля облігації", sign: -1 },
@@ -304,12 +371,13 @@ export const CASH_KINDS = {
 };
 
 export const transactions = {
-  async list({ accountId, kind, currency, from, to, refId, refType } = {}) {
+  async list({ accountId, pocketId, kind, currency, from, to, refId, refType } = {}) {
     let q = accountId
       ? db.cashTransactions.where("accountId").equals(accountId)
       : db.cashTransactions.orderBy("date");
     let all = await q.toArray();
 
+    if (pocketId)  all = all.filter(t => t.pocketId === pocketId);
     if (kind)      all = all.filter(t => t.kind === kind);
     if (currency)  all = all.filter(t => t.currency === currency);
     if (from)      all = all.filter(t => t.date >= isoDate(from));
@@ -322,7 +390,7 @@ export const transactions = {
 
   get: (id) => db.cashTransactions.get(id),
 
-  async balanceByCurrency(accountId, asOf = null) {
+  async balanceByCurrency(accountId, asOf = null, pocketId = null) {
     let all;
     if (accountId) {
       all = await db.cashTransactions.where("accountId").equals(accountId).toArray();
@@ -333,6 +401,7 @@ export const transactions = {
       const asOfIso = isoDate(asOf);
       all = all.filter(t => t.date <= asOfIso);
     }
+    if (pocketId) all = all.filter(t => t.pocketId === pocketId);
     const result = {};
     for (const t of all) {
       const cur = t.currency || "UAH";
@@ -341,26 +410,28 @@ export const transactions = {
     return result;
   },
 
-  async deposit({ accountId, amount, currency, date, notes }) {
+  async deposit({ accountId, pocketId, amount, currency, date, notes }) {
     if (!accountId) throw new Error("Рахунок обов'язковий");
     const amt = Math.abs(Number(amount));
     if (!Number.isFinite(amt) || amt <= 0) throw new Error("Сума має бути > 0");
     const acc = await db.accounts.get(accountId);
     if (!acc) throw new Error("Рахунок не знайдено");
+    await requirePocket(pocketId);
     return await transactions._addRaw({
-      accountId, date, currency: currency || acc.primaryCurrency,
+      accountId, pocketId, date, currency: currency || acc.primaryCurrency,
       amount: amt, kind: "deposit", notes,
     });
   },
 
-  async withdraw({ accountId, amount, currency, date, notes }) {
+  async withdraw({ accountId, pocketId, amount, currency, date, notes }) {
     if (!accountId) throw new Error("Рахунок обов'язковий");
     const amt = Math.abs(Number(amount));
     if (!Number.isFinite(amt) || amt <= 0) throw new Error("Сума має бути > 0");
     const acc = await db.accounts.get(accountId);
     if (!acc) throw new Error("Рахунок не знайдено");
+    await requirePocket(pocketId);
     return await transactions._addRaw({
-      accountId, date, currency: currency || acc.primaryCurrency,
+      accountId, pocketId, date, currency: currency || acc.primaryCurrency,
       amount: -amt, kind: "withdrawal", notes,
     });
   },
@@ -370,7 +441,7 @@ export const transactions = {
    * до залишку. Це не «зняття» — гроші не виходять із фонду, вони змінюють
    * форму, тому окремий вид операції, який не рахується як відтік власника.
    */
-  async cryptoBuy({ accountId, amount, ticker, coinAmount, currency, date, notes }) {
+  async cryptoBuy({ accountId, pocketId, amount, ticker, coinAmount, currency, date, notes }) {
     if (!accountId) throw new Error("Рахунок обов'язковий");
     const acc = await db.accounts.get(accountId);
     if (!acc) throw new Error("Рахунок не знайдено");
@@ -381,11 +452,14 @@ export const transactions = {
     if (amt <= 0 && coins <= 0) throw new Error("Вкажи суму або кількість монет");
     const t = String(ticker || "").toUpperCase();
     if (coins > 0 && !t) throw new Error("Вибери монету");
+    // Кишеня обов'язкова і тут: воронка одна для всіх операцій. Те, що крипта
+    // повністю дитяча — рішення інтерфейсу, а не сховища.
+    await requirePocket(pocketId);
 
     await db.transaction("rw", [db.cashTransactions, db.accounts], async () => {
       if (amt > 0) {
         const tx = await transactions._addRaw({
-          accountId, date, currency: currency || acc.primaryCurrency,
+          accountId, pocketId, date, currency: currency || acc.primaryCurrency,
           amount: -amt, kind: "crypto_buy",
           notes: notes || (coins > 0 ? `Куплено ${coins} ${t}` : "Купівля крипти"),
         });
@@ -406,7 +480,7 @@ export const transactions = {
     });
   },
 
-  async transfer({ fromAccountId, toAccountId, amount, currency, date, notes }) {
+  async transfer({ fromAccountId, toAccountId, pocketId, amount, currency, date, notes }) {
     if (!fromAccountId || !toAccountId) throw new Error("Обидва рахунки обов'язкові");
     if (fromAccountId === toAccountId)   throw new Error("Рахунки мають бути різні");
     const amt = Math.abs(Number(amount));
@@ -417,6 +491,7 @@ export const transactions = {
     ]);
     if (!fromAcc) throw new Error("Рахунок-джерело не знайдено");
     if (!toAcc)   throw new Error("Рахунок-отримувач не знайдено");
+    await requirePocket(pocketId);
 
     const curr = currency || fromAcc.primaryCurrency || "UAH";
     const dateIso = isoDate(date) || now();
@@ -426,16 +501,60 @@ export const transactions = {
     await db.transaction("rw", db.cashTransactions, async () => {
       await db.cashTransactions.bulkAdd([
         {
-          id: outId, accountId: fromAccountId, date: dateIso, currency: curr,
+          id: outId, accountId: fromAccountId, pocketId, date: dateIso, currency: curr,
           amount: -amt, kind: "transfer_out",
           counterTxId: inId, counterAccountId: toAccountId,
           notes: notes || `→ ${toAcc.name}`, createdAt: now(),
         },
         {
-          id: inId, accountId: toAccountId, date: dateIso, currency: curr,
+          id: inId, accountId: toAccountId, pocketId, date: dateIso, currency: curr,
           amount: +amt, kind: "transfer_in",
           counterTxId: outId, counterAccountId: fromAccountId,
           notes: notes || `← ${fromAcc.name}`, createdAt: now(),
+        },
+      ]);
+    });
+
+    return { outId, inId };
+  },
+
+  /**
+   * Переказ між кишенями в межах одного рахунку.
+   *
+   * Гроші нікуди не йдуть — змінюється лише те, чиї вони. Потрібно щоразу,
+   * коли дитячий купон іде на батьківський папір або навпаки: без цього
+   * залишок кишені, з якої платили, піде в мінус.
+   */
+  async pocketTransfer({ accountId, fromPocketId, toPocketId, amount, currency, date, notes }) {
+    if (!accountId) throw new Error("Рахунок обов'язковий");
+    if (fromPocketId === toPocketId) throw new Error("Кишені мають бути різні");
+    const amt = Math.abs(Number(amount));
+    if (!Number.isFinite(amt) || amt <= 0) throw new Error("Сума має бути > 0");
+
+    const acc = await db.accounts.get(accountId);
+    if (!acc) throw new Error("Рахунок не знайдено");
+    const [from, to] = await Promise.all([
+      requirePocket(fromPocketId), requirePocket(toPocketId),
+    ]);
+
+    const curr = currency || acc.primaryCurrency || "UAH";
+    const dateIso = isoDate(date) || now();
+    const outId = uid();
+    const inId = uid();
+
+    await db.transaction("rw", db.cashTransactions, async () => {
+      await db.cashTransactions.bulkAdd([
+        {
+          id: outId, accountId, pocketId: fromPocketId, date: dateIso, currency: curr,
+          amount: -amt, kind: "pocket_out",
+          counterTxId: inId, counterAccountId: accountId,
+          notes: notes || `→ ${to.name}`, createdAt: now(),
+        },
+        {
+          id: inId, accountId, pocketId: toPocketId, date: dateIso, currency: curr,
+          amount: +amt, kind: "pocket_in",
+          counterTxId: outId, counterAccountId: accountId,
+          notes: notes || `← ${from.name}`, createdAt: now(),
         },
       ]);
     });
@@ -447,6 +566,7 @@ export const transactions = {
     const tx = {
       id: data.id || uid(),
       accountId: data.accountId,
+      pocketId: data.pocketId || null,
       date: isoDate(data.date) || now(),
       currency: data.currency || "UAH",
       amount: Number(data.amount) || 0,
@@ -499,6 +619,7 @@ function buildLotPurchaseTx(lot, bond) {
   return {
     id: uid(),
     accountId: lot.accountId,
+    pocketId: lot.pocketId,
     date: lot.purchaseDate,
     currency: bond.currency,
     amount: -lotInvested(lot),
@@ -511,12 +632,14 @@ function buildLotPurchaseTx(lot, bond) {
 }
 
 export const lots = {
-  async list({ accountId, isin } = {}) {
+  async list({ accountId, isin, pocketId } = {}) {
     let q;
     if (accountId)      q = db.lots.where("accountId").equals(accountId);
+    else if (pocketId)  q = db.lots.where("pocketId").equals(pocketId);
     else if (isin)      q = db.lots.where("isin").equals(isin);
     else                q = db.lots.orderBy("purchaseDate");
-    const all = await q.toArray();
+    let all = await q.toArray();
+    if (pocketId) all = all.filter(l => l.pocketId === pocketId);
     if (accountId && isin) return all.filter(l => l.isin === isin);
     return all.sort((a, b) => (a.purchaseDate || "").localeCompare(b.purchaseDate || ""));
   },
@@ -532,6 +655,7 @@ export const lots = {
     if (!bond) throw new Error(`ISIN ${data.isin} не знайдено в довіднику.`);
     const acc = await db.accounts.get(data.accountId);
     if (!acc) throw new Error("Рахунок не знайдено");
+    await requirePocket(data.pocketId);
 
     const qty = Math.floor(Number(data.quantity));
     let accruedPerPiece;
@@ -547,6 +671,7 @@ export const lots = {
       id: uid(),
       isin: data.isin,
       accountId: data.accountId,
+      pocketId: data.pocketId,
       purchaseDate: isoDate(data.purchaseDate) || now(),
       quantity: qty,
       purchasePrice: Number(data.purchasePrice) || bond.faceValue,
@@ -590,6 +715,7 @@ export const lots = {
       await db.cashTransactions.add({
         id: uid(),
         accountId: accountId || lot.accountId,
+        pocketId: lot.pocketId,
         date: when,
         currency: bond?.currency || "UAH",
         amount: proceeds,
@@ -682,62 +808,85 @@ export const lots = {
     });
   },
 
-  async split({ lotId, quantityForNew, newAccountId, notes }) {
+  /**
+   * Виділяє частину штук в окремий лот — на інший рахунок, в іншу кишеню
+   * або і те, і те.
+   *
+   * Поділ у межах ОДНОГО рахунку — основний випадок кишень: папір куплено
+   * частково за свої гроші, частково за дитячі. Раніше це було заборонено
+   * (вимагався інший рахунок), тож єдиний спосіб розділити власність не
+   * працював.
+   */
+  async split({ lotId, quantityForNew, newAccountId, newPocketId, notes }) {
     const qNew = Math.floor(Number(quantityForNew));
     if (!Number.isFinite(qNew) || qNew <= 0) throw new Error("Кількість має бути > 0");
 
     const old = await db.lots.get(lotId);
     if (!old) throw new Error("Лот не знайдено");
     if (qNew >= old.quantity) throw new Error("Не можна винести всі або більше штук");
-    if (!newAccountId) throw new Error("Цільовий рахунок обов'язковий");
-    if (newAccountId === old.accountId) throw new Error("Новий рахунок має бути іншим");
 
-    const newAcc = await db.accounts.get(newAccountId);
+    const targetAccountId = newAccountId || old.accountId;
+    const targetPocketId  = newPocketId  || old.pocketId;
+    if (targetAccountId === old.accountId && targetPocketId === old.pocketId) {
+      throw new Error("Має змінитися рахунок або кишеня — інакше ділити нема сенсу");
+    }
+
+    const newAcc = await db.accounts.get(targetAccountId);
     if (!newAcc) throw new Error("Цільовий рахунок не знайдено");
+    await requirePocket(targetPocketId);
     const bond = await db.bondReferences.get(old.isin);
     if (!bond) throw new Error("Облігація не знайдена в довіднику");
 
     return await db.transaction("rw", [db.lots, db.couponPayments, db.cashTransactions], async () => {
       const remaining = old.quantity - qNew;
+      const oldCommission = Number(old.commission) || 0;
+      // Комісія теж ділиться — інакше сума двох половин не дорівнює цілому,
+      // і баланс рахунку поїде рівно на розбіжність.
+      const newCommission = Math.round(oldCommission * qNew / old.quantity * 100) / 100;
+
       const newLot = {
         id: uid(),
         isin: old.isin,
-        accountId: newAccountId,
+        accountId: targetAccountId,
+        pocketId: targetPocketId,
         purchaseDate: old.purchaseDate,
         quantity: qNew,
         purchasePrice: old.purchasePrice,
         accruedInterestPerPiece: Number(old.accruedInterestPerPiece) || 0,
-        commission: 0,
+        commission: newCommission,
+        closedAt: null,
+        closedReason: null,
         notes: notes || `Виділено з лоту ${old.id.slice(0, 8)}`,
         createdAt: now(),
       };
-      const oldUpdated = { ...old, quantity: remaining };
+      const oldUpdated = { ...old, quantity: remaining, commission: oldCommission - newCommission };
 
       await db.lots.add(newLot);
       await db.lots.put(oldUpdated);
 
-      // Cash transactions: split не міняє баланси готівки — це переміщення власності,
-      // а не нова покупка. Оригінальна purchase транзакція стара лот не зачіпається.
-      // Створимо новий lot_purchase для новoгo лоту з сумою 0 і поміткою — щоб
-      // лот мав свою trace-tx (для refType=lot lookup при future update/remove).
-      const traceTx = {
-        id: uid(),
-        accountId: newAccountId,
-        date: now(),
-        currency: bond.currency,
-        amount: 0,                          // 0 — це trace, не реальне списання
-        kind: "lot_purchase",
-        refId: newLot.id,
-        refType: "lot",
-        notes: `Виділено з лоту ${old.id.slice(0, 8)} (split, без списання)`,
-        createdAt: now(),
-      };
-      await db.cashTransactions.add(traceTx);
+      // Гроші при поділі не рухаються — рухається власність. Але кожен лот
+      // мусить мати свою транзакцію покупки на СВОЮ суму.
+      //
+      // Раніше новий лот отримував trace-транзакцію з сумою 0, а старий
+      // зберігав повну суму вихідної покупки. Обидва записи порушували
+      // інваріант «транзакція покупки дорівнює вкладеному в лот», і перше ж
+      // редагування будь-якої з половин змушувало lots.update перерахувати
+      // її з нуля: у новому лоті з рахунку списувалось те, чого ніколи не
+      // витрачали, у старому — навпаки, залишок стрибав угору.
+      const oldTxs = await db.cashTransactions
+        .where("[refId+refType]").equals([lotId, "lot"]).toArray();
+      const oldTx = oldTxs[0];
 
-      // Update old lot's purchase tx amount proportionally? Залишаємо як було —
-      // інакше історія "скільки реально витратили на купівлю" втратиться.
-      // У старому лоті: amount tx — повна сума оригінальної покупки за всі quantity штук.
-      // Це фінансово коректно: гроші реально були витрачені колись.
+      const newTx = buildLotPurchaseTx(newLot, bond);
+      newTx.notes = `Виділено з лоту ${old.id.slice(0, 8)}`;
+      if (oldTx) newTx.date = oldTx.date;
+      await db.cashTransactions.add(newTx);
+
+      if (oldTx) {
+        const rebuilt = buildLotPurchaseTx(oldUpdated, bond);
+        await db.cashTransactions.put({ ...oldTx, amount: rebuilt.amount });
+        for (let i = 1; i < oldTxs.length; i++) await db.cashTransactions.delete(oldTxs[i].id);
+      }
 
       // Regenerate coupon schedules
       const newSchedule = generateCouponSchedule(bond, newLot);
@@ -826,6 +975,11 @@ export const coupons = {
           // емітент може перерахувати і кудись інде (у звіті ICU так сталося з
           // погашенням — воно пішло на банківський рахунок), тому дозволяємо вказати.
           accountId: accountId || lot.accountId,
+          // Гроші належать тій кишені, якій належав папір. Саме звідси
+          // береться розбивка погашення, коли в одну дату гасяться лоти
+          // обох сторін: рознесення по лотах уже пропорційне, лишається
+          // лише згрупувати результат.
+          pocketId: lot.pocketId,
           date,
           currency: bond.currency,
           amount: amt,
@@ -902,10 +1056,11 @@ export const coupons = {
 
 export const backup = {
   async exportAll() {
-    const [personsData, brokersData, accountsData, bondsData, lotsData, couponsData, txData, snapshotsData] = await Promise.all([
+    const [personsData, brokersData, accountsData, pocketsData, bondsData, lotsData, couponsData, txData, snapshotsData] = await Promise.all([
       db.persons.toArray(),
       db.brokers.toArray(),
       db.accounts.toArray(),
+      db.pockets.toArray(),
       db.bondReferences.toArray(),
       db.lots.toArray(),
       db.couponPayments.toArray(),
@@ -933,6 +1088,7 @@ export const backup = {
         persons: personsData,
         brokers: brokersData,
         accounts: accountsData,
+        pockets: pocketsData,
         bondReferences: bondsData,
         lots: lotsData,
         couponPayments: couponsData,
@@ -948,19 +1104,20 @@ export const backup = {
   async importAll(payload) {
     if (!payload?.data) throw new Error("Невалідний файл бекапу");
     const migrated = migrateBackup(payload);
-    const { persons: p, brokers: br, accounts: a, bondReferences: b, lots: l, couponPayments: c, cashTransactions: t, snapshots: s } = migrated.data;
+    const { persons: p, brokers: br, accounts: a, pockets: pk, bondReferences: b, lots: l, couponPayments: c, cashTransactions: t, snapshots: s } = migrated.data;
 
     await db.transaction("rw",
-      [db.persons, db.brokers, db.accounts, db.bondReferences, db.lots, db.couponPayments, db.cashTransactions, db.snapshots],
+      [db.persons, db.brokers, db.accounts, db.pockets, db.bondReferences, db.lots, db.couponPayments, db.cashTransactions, db.snapshots],
       async () => {
         await Promise.all([
-          db.persons.clear(), db.brokers.clear(), db.accounts.clear(),
+          db.persons.clear(), db.brokers.clear(), db.accounts.clear(), db.pockets.clear(),
           db.bondReferences.clear(), db.lots.clear(),
           db.couponPayments.clear(), db.cashTransactions.clear(), db.snapshots.clear(),
         ]);
         if (p?.length)  await db.persons.bulkPut(p);
         if (br?.length) await db.brokers.bulkPut(br);
         if (a?.length)  await db.accounts.bulkPut(a);
+        if (pk?.length) await db.pockets.bulkPut(pk);
         if (b?.length)  await db.bondReferences.bulkPut(b);
         if (l?.length)  await db.lots.bulkPut(l);
         if (c?.length)  await db.couponPayments.bulkPut(c);
@@ -1027,112 +1184,6 @@ export const snapshots = {
 };
 
 // ── Demo / Sample Portfolio ────────────────────────────────────────────────
-
-export const demo = {
-  async loadSamplePortfolio() {
-    // Ensure brokers are seeded
-    await seedDefaultBrokers();
-
-    // Sample bonds (з реальних скрінів Monobank ICU)
-    const sampleBonds = [
-      {
-        isin: "UA4000234215", ticker: "ОВДП-2026-06",
-        type: "ovdp", currency: "UAH", faceValue: 1000,
-        couponRate: 15.10, couponFrequency: 0,  // bullet (1 виплата)
-        issueDate: "2025-06-24", maturityDate: "2026-06-24",
-        issuer: "Мінфін України",
-        notes: "Демо ОВДП — короткострокова",
-      },
-      {
-        isin: "UA4000238992", ticker: "ОВДП-2029-04",
-        type: "ovdp", currency: "UAH", faceValue: 1000,
-        couponRate: 16.20, couponFrequency: 2,
-        issueDate: "2026-04-25", maturityDate: "2029-04-25",
-        issuer: "Мінфін України",
-        notes: "Демо ОВДП — на 3 роки",
-      },
-    ];
-    for (const b of sampleBonds) {
-      if (!(await db.bondReferences.get(b.isin))) {
-        await bonds.add(b);
-      }
-    }
-
-    // Spільний рахунок на ICU
-    const sharedAccountId = "demo_shared";
-    if (!(await db.accounts.get(sharedAccountId))) {
-      await accounts.add({
-        id: sharedAccountId,
-        name: "Доньки разом (демо)",
-        kind: "shared",
-        brokerId: "broker_icu",
-        beneficiaryIds: ["child1", "child2"],
-        primaryCurrency: "UAH",
-        color: "#c9a96a",
-        emoji: "👨‍👩‍👧",
-      });
-    }
-
-    // Tato personal account on Monobank
-    const tatoAccountId = "demo_tato";
-    if (!(await db.accounts.get(tatoAccountId))) {
-      await accounts.add({
-        id: tatoAccountId,
-        name: "Тато Monobank (демо)",
-        kind: "personal",
-        brokerId: "broker_mono",
-        beneficiaryIds: ["me"],
-        primaryCurrency: "UAH",
-        color: "#000000",
-        emoji: "🖤",
-      });
-    }
-
-    // Deposits
-    await transactions.deposit({ accountId: sharedAccountId, amount: 50000, currency: "UAH", date: "2026-03-15", notes: "Стартове поповнення (демо)" });
-    await transactions.deposit({ accountId: tatoAccountId,   amount: 30000, currency: "UAH", date: "2026-03-20", notes: "Стартове поповнення (демо)" });
-
-    // Lots
-    await lots.add({
-      isin: "UA4000234215", accountId: sharedAccountId,
-      quantity: 10, purchasePrice: 1000, accruedInterestPerPiece: 30,
-      purchaseDate: "2026-04-01",
-      notes: "Демо-лот",
-    });
-    await lots.add({
-      isin: "UA4000238992", accountId: sharedAccountId,
-      quantity: 15, purchasePrice: 1000, accruedInterestPerPiece: 5,
-      purchaseDate: "2026-05-01",
-      notes: "Демо-лот",
-    });
-    await lots.add({
-      isin: "UA4000238992", accountId: tatoAccountId,
-      quantity: 20, purchasePrice: 1000, accruedInterestPerPiece: 5,
-      purchaseDate: "2026-05-01",
-      notes: "Демо-лот",
-    });
-
-    return true;
-  },
-
-  async clearAll() {
-    await db.transaction("rw",
-      [db.persons, db.brokers, db.accounts, db.bondReferences, db.lots, db.couponPayments, db.cashTransactions],
-      async () => {
-        await db.cashTransactions.clear();
-        await db.couponPayments.clear();
-        await db.lots.clear();
-        await db.bondReferences.clear();
-        await db.accounts.clear();
-        await db.persons.clear();
-        await db.brokers.clear();
-      });
-    localStorage.removeItem("df_portfolio_seeded_v2");
-    localStorage.removeItem("df_last_backup_at");
-  },
-};
-
-// ── Seed Defaults ───────────────────────────────────────────────────────────
 
 export async function seedDefaultsIfEmpty() {
   await seedDefaultBrokers();

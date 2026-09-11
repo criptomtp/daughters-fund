@@ -14,8 +14,8 @@ const money = (n) => (n == null || !isFinite(n) ? "—" : "₴" + Math.round(n).
 const money2 = (n) => (n == null || !isFinite(n) ? "—" : "₴" + (Math.round(n * 100) / 100).toLocaleString("uk-UA"));
 const day = (d) => String(d || "").slice(0, 10);
 
-export function PositionsPanel() {
-  const { list: lots } = useLots({});
+export function PositionsPanel({ pocket }) {
+  const { list: allLots } = useLots({});
   const { list: bonds } = useBonds();
   const { list: coupons } = useCoupons({});
   const { list: accounts } = useAccounts();
@@ -36,6 +36,9 @@ export function PositionsPanel() {
       .catch(() => {});
     return () => { alive = false; };
   }, []);
+
+  const pocketId = pocket?.id || null;
+  const lots = pocketId ? allLots.filter(l => l.pocketId === pocketId) : allLots;
 
   const bondsByIsin = new Map(bonds.map(b => [b.isin, b]));
   const accById = new Map(accounts.map(a => [a.id, a]));

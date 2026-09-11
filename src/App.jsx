@@ -5,6 +5,8 @@ import { FundScreen } from "./portfolio/FundScreen.jsx";
 import { HistoryScreen } from "./portfolio/HistoryScreen.jsx";
 import { DetailsScreen } from "./portfolio/DetailsScreen.jsx";
 import { RecordSheet } from "./portfolio/RecordSheet.jsx";
+import { PocketSwitch } from "./portfolio/PocketSwitch.jsx";
+import { usePocketSpace } from "./portfolio/hooks/usePocketSpace.js";
 import { snapshots } from "./portfolio/repository.js";
 
 // Каркас застосунку: три екрани внизу + кнопка запису.
@@ -31,6 +33,7 @@ const loadTab = () => {
 export default function App() {
   const { market, loading: pricesLoading, error: pricesError, refresh: refreshPrices } = useMarket();
   const [tab, setTab] = useState(loadTab);
+  const { pockets, pocket, pocketId, setPocketId } = usePocketSpace();
   const [detail, setDetail] = useState(null);      // відкритий підекран «Деталей»
   const [sheet, setSheet] = useState(null);        // null | "buy" | "coupon" | "transfer"
 
@@ -83,13 +86,16 @@ export default function App() {
   return (
     <div className="app">
       <main className="app-main">
+        <PocketSwitch pockets={pockets} pocketId={pocketId} onChange={setPocketId} />
         {tab === "fund" && (
           <FundScreen market={market} pricesLoading={pricesLoading} pricesError={pricesError}
-            onRefreshPrices={refreshPrices} onRecord={openSheet} onOpenDetails={openDetail} />
+            onRefreshPrices={refreshPrices} onRecord={openSheet} onOpenDetails={openDetail}
+            pocket={pocket} />
         )}
-        {tab === "history" && <HistoryScreen />}
+        {tab === "history" && <HistoryScreen pocket={pocket} />}
         {tab === "details" && (
-          <DetailsScreen open={detail} onOpen={openDetail} onClose={closeLayer} market={market} />
+          <DetailsScreen open={detail} onOpen={openDetail} onClose={closeLayer} market={market}
+            pocket={pocket} />
         )}
       </main>
 
@@ -110,7 +116,8 @@ export default function App() {
         ))}
       </nav>
 
-      <RecordSheet open={!!sheet} initialTab={sheet || "buy"} onClose={closeLayer} market={market} />
+      <RecordSheet open={!!sheet} initialTab={sheet || "buy"} onClose={closeLayer} market={market}
+        pocket={pocket} pockets={pockets} />
     </div>
   );
 }

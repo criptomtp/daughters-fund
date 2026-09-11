@@ -36,16 +36,22 @@ function human(dateIso) {
   return `${Number(d[2])} ${MONTHS[Number(d[1]) - 1]}`;
 }
 
-export function HistoryScreen() {
+export function HistoryScreen({ pocket }) {
   const { list: accounts } = useAccounts();
   const [filter, setFilter] = useState("all");
-  const { list: txs } = useTransactions({
+  const { list: allTxs } = useTransactions({
     accountId: filter === "all" ? undefined : filter,
     limit: 100000,
   });
-  const { list: lots } = useLots({});
+  const { list: allLots } = useLots({});
   const { list: bonds } = useBonds();
   const { list: coupons } = useCoupons({});
+
+  // Історія показує один простір: у стрічці операцій чужі внески читались би
+  // як власні, а найближчі виплати — як ті, що надійдуть тобі.
+  const pocketId = pocket?.id || null;
+  const txs  = useMemo(() => (pocketId ? allTxs.filter(t => t.pocketId === pocketId) : allTxs), [allTxs, pocketId]);
+  const lots = useMemo(() => (pocketId ? allLots.filter(l => l.pocketId === pocketId) : allLots), [allLots, pocketId]);
 
   const bondByIsin = useMemo(() => new Map(bonds.map(b => [b.isin, b])), [bonds]);
   const lotById = useMemo(() => new Map(lots.map(l => [l.id, l])), [lots]);

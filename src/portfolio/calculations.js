@@ -459,15 +459,95 @@ export function convertCurrency(amount, from, to, rates) {
 
 // Fraction of a (possibly shared) account that belongs to a beneficiary. Uses
 // explicit beneficiaryWeights when present, otherwise an equal 1/N split.
-export function beneficiaryShare(account, personId) {
-  const ids = account.beneficiaryIds || [];
-  if (ids.length === 0) return 0;
-  const weights = account.beneficiaryWeights;
-  if (weights && typeof weights === "object") {
-    const total = ids.reduce((s, id) => s + (Number(weights[id]) || 0), 0);
-    if (total > 0) return (Number(weights[personId]) || 0) / total;
+/**
+ * Частка особи в кишені.
+ *
+ * Прийшла на зміну beneficiaryShare, яка рахувала частку в РАХУНКУ. Різниця
+ * принципова: рахунок один на всіх, а кишень на ньому дві, і множити вартість
+ * лоту на частку рахунку після того, як лот уже віднесено до кишені, означає
+ * поділити те саме вдруге.
+ */
+export function pocketShare(pocket, personId) {
+  const weights = pocket?.memberWeights;
+  if (!weights || typeof weights !== "object") return 0;
+  let total = 0;
+  for (const w of Object.values(weights)) {
+    const n = Number(w);
+    if (Number.isFinite(n) && n > 0) total += n;
   }
-  return 1 / ids.length;
+  if (total <= 0) return 0;
+  const mine = Number(weights[personId]);
+  return Number.isFinite(mine) && mine > 0 ? mine / total : 0;
+}
+
+/** Готівка по кишенях: один прохід по транзакціях, один результат на всіх. */
+export function cashByPocketFrom(txs) {
+  const out = new Map();
+  for (const t of txs || []) {
+    if (!t.pocketId) continue;
+    const cur = t.currency || "UAH";
+    const prev = out.get(t.pocketId) || {};
+    prev[cur] = (prev[cur] || 0) + (Number(t.amount) || 0);
+    out.set(t.pocketId, prev);
+  }
+  return out;
+}
+
+/**
+ * Вартість монет на біржових рахунках, рознесена по кишенях.
+ *
+ * Залишок монет лежить одним числом на рахунку — окремої позначки власника
+ * в ньому немає. Тому ділимо його пропорційно тому, скільки кожна кишеня
+ * витратила на купівлю крипти саме на цьому рахунку. Якщо купівель немає —
+ * пропорційно внескам. Якщо й тих немає, залишок нікуди не потрапляє, і це
+ * краще, ніж мовчки віддати його комусь одному.
+ */
+export function extraByPocketFrom({ accounts = [], txs = [], valueByAccountId = new Map() }) {
+  const out = new Map();
+  for (const acc of accounts) {
+    const value = Number(valueByAccountId.get?.(acc.id) ?? valueByAccountId[acc.id] ?? 0) || 0;
+    if (!value) continue;
+
+    const accTxs = (txs || []).filter(t => t.accountId === acc.id && t.pocketId);
+    let weights = new Map();
+    for (const t of accTxs) {
+      if (t.kind !== "crypto_buy") continue;
+      weights.set(t.pocketId, (weights.get(t.pocketId) || 0) + Math.abs(Number(t.amount) || 0));
+    }
+    if (weights.size === 0) {
+      for (const t of accTxs) {
+        if (t.kind !== "deposit") continue;
+        weights.set(t.pocketId, (weights.get(t.pocketId) || 0) + Math.abs(Number(t.amount) || 0));
+      }
+    }
+    let total = 0;
+    for (const w of weights.values()) total += w;
+    if (total <= 0) continue;
+
+    for (const [pocketId, w] of weights) {
+      out.set(pocketId, (out.get(pocketId) || 0) + value * (w / total));
+    }
+  }
+  return out;
+}
+
+/** Вартість однієї кишені: її лоти, її готівка, її частка монет. */
+export function pocketValue({
+  pocketId, lots, bondsByIsin,
+  cashByPocket = new Map(), extraByPocket = new Map(),
+  asOfDate = new Date().toISOString(),
+}) {
+  if (!pocketId) return 0;
+  let total = 0;
+  for (const lot of lots) {
+    if (lot.pocketId !== pocketId) continue;
+    const bond = bondsByIsin.get(lot.isin);
+    if (bond) total += lotCurrentValue(bond, lot, asOfDate);
+  }
+  const cashObj = cashByPocket.get?.(pocketId) || cashByPocket[pocketId] || {};
+  for (const cur of Object.keys(cashObj)) total += Number(cashObj[cur]) || 0;
+  total += Number(extraByPocket.get?.(pocketId) ?? extraByPocket[pocketId] ?? 0) || 0;
+  return total;
 }
 
 /**
@@ -478,26 +558,19 @@ export function beneficiaryShare(account, personId) {
  * головний рахував по номіналу, цілі — по поточній вартості з готівкою).
  */
 export function personShareValue({
-  person, accounts, lots, bondsByIsin,
-  cashByAccount = new Map(),
-  extraByAccount = new Map(),        // біржові рахунки: оцінка монет у гривні
+  person, pockets, lots, bondsByIsin,
+  cashByPocket = new Map(),
+  extraByPocket = new Map(),
   asOfDate = new Date().toISOString(),
 }) {
   if (!person) return 0;
   let total = 0;
-  for (const acc of accounts) {
-    const share = beneficiaryShare(acc, person.id);
+  for (const pocket of pockets || []) {
+    const share = pocketShare(pocket, person.id);
     if (!share) continue;
-    let accTotal = 0;
-    for (const lot of lots) {
-      if (lot.accountId !== acc.id) continue;
-      const bond = bondsByIsin.get(lot.isin);
-      if (bond) accTotal += lotCurrentValue(bond, lot, asOfDate);
-    }
-    const cashObj = cashByAccount.get?.(acc.id) || cashByAccount[acc.id] || {};
-    for (const cur of Object.keys(cashObj)) accTotal += Number(cashObj[cur]) || 0;
-    accTotal += Number(extraByAccount.get?.(acc.id) ?? extraByAccount[acc.id] ?? 0) || 0;
-    total += accTotal * share;
+    total += pocketValue({
+      pocketId: pocket.id, lots, bondsByIsin, cashByPocket, extraByPocket, asOfDate,
+    }) * share;
   }
   return total;
 }
@@ -533,9 +606,21 @@ export function projectedAtRate({ current, monthly, years, annualReturnPct = 0 }
   return current * Math.pow(1 + r, years) + monthly * ((Math.pow(1 + m, n) - 1) / m);
 }
 
+/**
+ * Прогрес до цілі — той самий розрахунок частки, що й на головному екрані.
+ *
+ * Раніше тут жила ВЛАСНА копія логіки: свій фільтр рахунків по beneficiaryIds
+ * і своє множення на beneficiaryShare. Коментар над personShareValue обіцяв
+ * «одне джерело для головного екрана і для екрана цілей», і це було неправдою
+ * рівно доти, доки обидві функції випадково рахували однаково. Тепер джерело
+ * справді одне: обидві йдуть через pocketValue.
+ *
+ * Валюта — єдина причина, чому тут не просто виклик personShareValue: ціль
+ * може бути в доларах, і кожну складову треба перерахувати окремо.
+ */
 export function goalProgress({
-  person, accounts, lots, bondsByIsin, cashByAccount = new Map(),
-  extraByAccount = new Map(),
+  person, pockets, lots, bondsByIsin, cashByPocket = new Map(),
+  extraByPocket = new Map(),
   fxRates = null,
   annualReturnPct = 0,
   asOfDate = new Date().toISOString(),
@@ -550,28 +635,31 @@ export function goalProgress({
   const daysLeft  = Math.max(0, Math.floor((eighteen - now) / MS_PER_DAY));
   const yearsLeft = daysLeft / 365.25;
 
-  const myAccounts = accounts.filter(a => (a.beneficiaryIds || []).includes(person.id));
-
   let currentValue = 0;
-  for (const acc of myAccounts) {
-    const accLots = lots.filter(l => l.accountId === acc.id);
-    let accAssets = 0;
-    for (const lot of accLots) {
+  for (const pocket of pockets || []) {
+    const share = pocketShare(pocket, person.id);
+    if (!share) continue;
+
+    let assets = 0;
+    for (const lot of lots) {
+      if (lot.pocketId !== pocket.id) continue;
       const bond = bondsByIsin.get(lot.isin);
       if (!bond) continue;
-      // Convert each holding into the goal currency (skip if no FX rate available).
+      // Кожну позицію переводимо у валюту цілі окремо; без курсу — пропускаємо,
+      // бо приписати гривню до доларової цілі гірше, ніж не показати нічого.
       const conv = convertCurrency(lotCurrentValue(bond, lot, asOfDate), bond.currency, currency, fxRates);
-      if (conv != null) accAssets += conv;
+      if (conv != null) assets += conv;
     }
-    const cashObj = (cashByAccount.get?.(acc.id) || cashByAccount[acc.id] || {});
-    let accCash = 0;
+
+    const cashObj = (cashByPocket.get?.(pocket.id) || cashByPocket[pocket.id] || {});
+    let cash = 0;
     for (const cur of Object.keys(cashObj)) {
       const conv = convertCurrency(cashObj[cur] || 0, cur, currency, fxRates);
-      if (conv != null) accCash += conv;
+      if (conv != null) cash += conv;
     }
-    const accExtra = Number(extraByAccount.get?.(acc.id) ?? extraByAccount[acc.id] ?? 0) || 0;
-    const accTotal = accAssets + accCash + accExtra;
-    currentValue += accTotal * beneficiaryShare(acc, person.id);
+
+    const extra = Number(extraByPocket.get?.(pocket.id) ?? extraByPocket[pocket.id] ?? 0) || 0;
+    currentValue += (assets + cash + extra) * share;
   }
 
   const progress = person.targetAmount > 0 ? currentValue / person.targetAmount : 0;
@@ -784,9 +872,10 @@ export function groupCouponsByMonth(coupons) {
  * Дохідність рахуємо по всіх грошових потоках позиції разом (XIRR), а не
  * як середнє з лотових — середнє з відсотків не має фінансового сенсу.
  */
-export function groupPositions({ lots = [], bondsByIsin = new Map(), coupons = [], asOfDate = new Date().toISOString() }) {
+export function groupPositions({ lots = [], bondsByIsin = new Map(), coupons = [], pocketId = null, asOfDate = new Date().toISOString() }) {
   const today = String(asOfDate).slice(0, 10);
-  const open = lots.filter(l => !l.closedAt || String(l.closedAt).slice(0, 10) > today);
+  const scoped = pocketId ? lots.filter(l => l.pocketId === pocketId) : lots;
+  const open = scoped.filter(l => !l.closedAt || String(l.closedAt).slice(0, 10) > today);
   const byIsin = new Map();
 
   for (const lot of open) {

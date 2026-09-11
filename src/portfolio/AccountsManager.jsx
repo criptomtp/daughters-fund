@@ -3,6 +3,7 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "./db.js";
 import { useAccounts } from "./hooks/useAccounts.js";
 import { usePersons } from "./hooks/usePersons.js";
+import { usePockets } from "./hooks/usePockets.js";
 import { useBrokers } from "./hooks/useBrokers.js";
 import { useLots } from "./hooks/useLots.js";
 import { CURRENCIES } from "./taxRules.js";
@@ -21,6 +22,7 @@ const KIND_LABEL = { personal: "Персональний", shared: "Спільн
 export function AccountsManager() {
   const { list: accounts, loading, error, add, update, remove } = useAccounts();
   const { list: persons } = usePersons();
+  const { list: pockets } = usePockets();
   const { list: brokers } = useBrokers();
   const { list: lots } = useLots();
   const [creating, setCreating] = useState(false);
@@ -43,6 +45,22 @@ export function AccountsManager() {
       if (!result.has(t.accountId)) result.set(t.accountId, {});
       const map = result.get(t.accountId);
       const cur = t.currency || "UAH";
+      map[cur] = (map[cur] || 0) + (Number(t.amount) || 0);
+    }
+    return result;
+  }, [], new Map()) || new Map();
+
+  // Розбивка залишку по кишенях. Це єдине місце, де простори показані разом:
+  // у виписці брокера сума одна, і звіряти доводиться саме з нею.
+  const pocketBalances = useLiveQuery(async () => {
+    const all = await db.cashTransactions.toArray();
+    const result = new Map();
+    for (const t of all) {
+      if (!t.pocketId) continue;
+      const key = `${t.accountId}|${t.pocketId}`;
+      const cur = t.currency || "UAH";
+      if (!result.has(key)) result.set(key, {});
+      const map = result.get(key);
       map[cur] = (map[cur] || 0) + (Number(t.amount) || 0);
     }
     return result;
@@ -121,7 +139,7 @@ export function AccountsManager() {
                     </div>
                     <div className="account-card-meta">
                       <span className="account-beneficiaries">
-                        {beneficiaries.length === 0 && <em>немає бенефіціарів</em>}
+                        {beneficiaries.length === 0 && <em>власника не вказано</em>}
                         {beneficiaries.map((b, i) => (
                           <span key={b.id}>
                             {i > 0 && " · "}
@@ -140,6 +158,25 @@ export function AccountsManager() {
                             {i > 0 && " · "}{fmtMoney(balances[cur], cur)}
                           </span>
                         ))}
+                      </div>
+                    )}
+                    {pockets.length > 1 && (
+                      <div className="account-pockets">
+                        {pockets.map(pk => {
+                          const b = pocketBalances.get(`${acc.id}|${pk.id}`);
+                          if (!b) return null;
+                          return (
+                            <span key={pk.id} className="account-pocket-row">
+                              <span className="pocket-dot" style={{ background: pk.color }} />
+                              {pk.name}:{" "}
+                              {Object.keys(b).map((cur, i) => (
+                                <span key={cur} className={b[cur] < 0 ? "balance-neg" : ""}>
+                                  {i > 0 && " · "}{fmtMoney(b[cur], cur)}
+                                </span>
+                              ))}
+                            </span>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -203,19 +240,11 @@ function AccountForm({ kind, initial, persons, brokers, onSubmit, onCancel }) {
     if (!draft.name.trim() || !draft.brokerId) return;
     if (isShared && draft.beneficiaryIds.length < 2) return;
     if (!isShared && draft.beneficiaryIds.length !== 1) return;
-    // Keep only positive weights for currently-selected beneficiaries; drop the
-    // whole map if none → goalProgress falls back to an equal split.
-    let beneficiaryWeights = null;
-    if (isShared && draft.beneficiaryWeights) {
-      const cleaned = {};
-      let any = false;
-      for (const id of draft.beneficiaryIds) {
-        const w = Number(draft.beneficiaryWeights[id]);
-        if (Number.isFinite(w) && w > 0) { cleaned[id] = w; any = true; }
-      }
-      if (any) beneficiaryWeights = cleaned;
-    }
-    onSubmit({ ...draft, beneficiaryWeights });
+    // beneficiaryWeights більше нічим не керують: частки рахуються від ваг
+    // у кишені. Поле лишається в схемі, щоб старі бекапи відновлювались, але
+    // нове значення сюди не пишеться — інакше в базі жили б два джерела
+    // часток, з яких одне мовчазно ігнорується.
+    onSubmit({ ...draft });
   };
 
   const canSubmit = draft.name.trim() && draft.brokerId &&
@@ -256,7 +285,11 @@ function AccountForm({ kind, initial, persons, brokers, onSubmit, onCancel }) {
           </label>
           <div className="form-field form-field--full">
             <span className="form-label">
-              {isShared ? "Бенефіціари (≥ 2)" : "Бенефіціар (1)"}<span className="req">*</span>
+              {isShared ? "Юридично оформлено на (≥ 2)" : "Юридично оформлено на"}<span className="req">*</span>
+            </span>
+            <span className="form-hint">
+              Хто записаний власником рахунку в депозитарія. Чиї на ньому гроші —
+              окреме питання, воно вирішується кишенями на кожній покупці.
             </span>
             <div className="owner-members-grid">
               {persons.map(p => {
@@ -276,41 +309,20 @@ function AccountForm({ kind, initial, persons, brokers, onSubmit, onCancel }) {
             </div>
           </div>
 
-          {isShared && draft.beneficiaryIds.length >= 2 && (
-            <div className="form-field form-field--full">
-              <span className="form-label">Частки бенефіціарів (необов'язково — за замовч. порівну)</span>
-              <div className="beneficiary-weights">
-                {draft.beneficiaryIds.map(id => {
-                  const p = persons.find(x => x.id === id);
-                  if (!p) return null;
-                  return (
-                    <label key={id} className="beneficiary-weight-row">
-                      <span style={{ color: p.color }}>{p.emoji} {p.name}</span>
-                      <input
-                        type="number" min="0" step="1" className="form-input"
-                        value={draft.beneficiaryWeights?.[id] ?? ""}
-                        placeholder="порівну"
-                        onChange={e => {
-                          const v = e.target.value;
-                          setDraft(d => ({
-                            ...d,
-                            beneficiaryWeights: { ...(d.beneficiaryWeights || {}), [id]: v === "" ? undefined : Number(v) },
-                          }));
-                        }}
-                      />
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          <label className="form-field form-field--full">
+            <span className="form-label">Примітка про оформлення</span>
+            <input className="form-input" value={draft.legalOwnerNote || ""}
+              placeholder="напр. договір ICU № 123 від 2026-01-05, на батька"
+              onChange={e => upd("legalOwnerNote", e.target.value)} />
+          </label>
         </div>
 
         <div className="modal-info">
-          {isShared
-            ? "💡 Усі лоти на цьому рахунку — спільна власність обраних бенефіціарів. Купонні виплати відображаються як такі що розподіляться між ними. При 18-річчі — переносиш потрібний лот на персональний рахунок цієї особи."
-            : "💡 Лоти на цьому рахунку повністю належать одному бенефіціару. Купонні виплати належать тільки йому."
-          }
+          💡 Це поле нічого не рахує — воно фіксує юридичну реальність.
+          Підтвердженням прав на цінні папери є обліковий запис на рахунку
+          (ЗУ «Про депозитарну систему», ст. 8 ч. 1), тож власником вважається
+          той, на кого рахунок оформлено, незалежно від того, чиї гроші на ньому
+          лежать. Розподіл між своїми й дитячими грошима ведеться кишенями.
         </div>
 
         <div className="modal-actions">

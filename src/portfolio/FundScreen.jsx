@@ -9,6 +9,7 @@ import { useTransactions, useCashBalance } from "./hooks/useTransactions.js";
 import {
   accountSummary, portfolioXIRR, groupCouponEvents, nextCouponEvent,
   ageInYears, personShareValue, lotCurrentValue,
+  cashByPocketFrom, extraByPocketFrom, pocketShare,
 } from "./calculations.js";
 import { coinPriceUAH } from "./useMarket.js";
 
@@ -53,17 +54,23 @@ function Sparkline({ points }) {
   );
 }
 
-export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices, onRecord, onOpenDetails }) {
+export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices, onRecord, onOpenDetails, pocket }) {
   const now = new Date().toISOString();
   const today = now.slice(0, 10);
 
-  const { list: lots } = useLots({});
+  const { list: allLots } = useLots({});
   const { list: bonds } = useBonds();
   const { list: coupons } = useCoupons({});
   const { list: accounts } = useAccounts();
   const { list: persons } = usePersons();
-  const { list: txs } = useTransactions({ limit: 100000 });
+  const { list: allTxs } = useTransactions({ limit: 100000 });
   const snaps = useLiveQuery(() => db.snapshots.orderBy("date").toArray(), [], []);
+
+  // Екран показує один простір. Звужуємо дані один раз тут — далі весь
+  // розрахунок нижче працює так само, як працював до появи кишень.
+  const pocketId = pocket?.id || null;
+  const lots = pocketId ? allLots.filter(l => l.pocketId === pocketId) : allLots;
+  const txs  = pocketId ? allTxs.filter(t => t.pocketId === pocketId) : allTxs;
 
   const bondsByIsin = new Map(bonds.map(b => [b.isin, b]));
   const summary = accountSummary({ lots, bondsByIsin, coupons, asOfDate: now });
@@ -72,33 +79,35 @@ export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices
   // а не як послідовність угод — переоцінюємо за поточним курсом.
   const cryptoAccounts = accounts.filter(a => a.kind === "exchange");
   const cryptoIds = new Set(cryptoAccounts.map(a => a.id));
-  const cryptoValue = cryptoAccounts.reduce((sum, a) => {
-    const holdings = a.holdings || {};
-    return sum + Object.entries(holdings).reduce((s, [ticker, amount]) => {
+  const cryptoFullByAccount = new Map(cryptoAccounts.map(a => [
+    a.id,
+    Object.entries(a.holdings || {}).reduce((s, [ticker, amount]) => {
       const p = coinPriceUAH(ticker, market);
       return s + (p ? p * (Number(amount) || 0) : 0);
-    }, 0);
-  }, 0);
+    }, 0),
+  ]));
+  // Монети лежать на рахунку одним числом. Частку простору беремо з того,
+  // скільки він витратив на купівлю крипти саме тут — рахується по ПОВНОМУ
+  // списку операцій, інакше пропорція втратить знаменник.
+  const extraByPocket = extraByPocketFrom({
+    accounts: cryptoAccounts, txs: allTxs, valueByAccountId: cryptoFullByAccount,
+  });
+  const cryptoValue = pocketId
+    ? (extraByPocket.get(pocketId) || 0)
+    : [...cryptoFullByAccount.values()].reduce((s, v) => s + v, 0);
   const cryptoInvested = txs
     .filter(t => t.kind === "deposit" && cryptoIds.has(t.accountId))
     .reduce((s, t) => s + (Number(t.amount) || 0), 0);
 
   // Розкладки по рахунках — щоб частка доньки рахувалась з усього, що є
   // на її рахунках: облігації + готівка + монети на біржі.
-  const cryptoByAccount = new Map(cryptoAccounts.map(a => [
-    a.id,
-    Object.entries(a.holdings || {}).reduce((s, [t, amt]) => {
-      const p = coinPriceUAH(t, market);
-      return s + (p ? p * (Number(amt) || 0) : 0);
-    }, 0),
-  ]));
-  const cashByAccount = new Map();
-  for (const t of txs) {
-    const cur = t.currency || "UAH";
-    const prev = cashByAccount.get(t.accountId) || {};
-    prev[cur] = (prev[cur] || 0) + (Number(t.amount) || 0);
-    cashByAccount.set(t.accountId, prev);
-  }
+  const cashByPocket = cashByPocketFrom(allTxs);
+
+  // Показуємо учасників активної кишені, а не «всіх дітей»: у просторі «Я»
+  // дітей немає взагалі, і секція має показувати тебе.
+  const members = pocket
+    ? persons.filter(p => pocketShare(pocket, p.id) > 0)
+    : persons.filter(p => p.type === "child");
 
   const bondsValue = summary.byCurrency.UAH?.currentValue || 0;
   const cash = txs
@@ -224,12 +233,12 @@ export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices
         )}
       </section>
 
-      {persons.filter(p => p.type === "child").length > 0 && (
+      {members.length > 0 && (
         <section className="kids">
-          {persons.filter(p => p.type === "child").map(p => {
+          {members.map(p => {
             const share = personShareValue({
-              person: p, accounts, lots, bondsByIsin,
-              cashByAccount, extraByAccount: cryptoByAccount, asOfDate: now,
+              person: p, pockets: pocket ? [pocket] : [], lots: allLots, bondsByIsin,
+              cashByPocket, extraByPocket, asOfDate: now,
             });
             const age = p.birthDate ? ageInYears(p.birthDate) : null;
             const left = age != null ? Math.max(0, 18 - age) : null;
@@ -238,7 +247,8 @@ export function FundScreen({ market, pricesLoading, pricesError, onRefreshPrices
                 <span className="kid-name">{p.name}</span>
                 <span className="kid-value">{money(share)}</span>
                 <span className="kid-age">
-                  {left != null ? `${Math.floor(left)} р. до 18` : "вкажи дату народження"}
+                  {left != null ? `${Math.floor(left)} р. до 18`
+                    : p.type === "child" ? "вкажи дату народження" : "твоя частка"}
                 </span>
               </button>
             );

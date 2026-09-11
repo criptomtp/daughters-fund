@@ -4,7 +4,8 @@ import { useAccounts } from "./hooks/useAccounts.js";
 import { useLots } from "./hooks/useLots.js";
 import { useBonds } from "./hooks/useBonds.js";
 import { accounts as accountsRepo } from "./repository.js";
-import { ageInYears, goalProgress, avgMonthlyDeposits, projectedAtRate } from "./calculations.js";
+import { ageInYears, goalProgress, avgMonthlyDeposits, projectedAtRate,
+  cashByPocketFrom, extraByPocketFrom, pocketShare } from "./calculations.js";
 import { useTransactions, useCashBalance } from "./hooks/useTransactions.js";
 import { coinPriceUAH, COINS } from "./useMarket.js";
 import { BUILD_ID } from "../buildId.js";
@@ -17,6 +18,7 @@ import { CouponCalendar } from "./CouponCalendar.jsx";
 import { MaturityLadder } from "./MaturityLadder.jsx";
 import { AnalyticsPanel } from "./AnalyticsPanel.jsx";
 import { PositionsPanel } from "./PositionsPanel.jsx";
+import { usePockets } from "./hooks/usePockets.js";
 
 const money = (n) => (n == null || !isFinite(n) ? "—" : "₴" + Math.round(n).toLocaleString("uk-UA"));
 
@@ -43,7 +45,8 @@ function LiveField({ value, onSave, ...rest }) {
 }
 
 const SECTIONS = [
-  { id: "kids",      title: "Доньки",      hint: "дати народження, цілі" },
+  { id: "kids",      title: "Учасники",    hint: "дати народження, цілі" },
+  { id: "pockets",   title: "Кишені",      hint: "чиї гроші на спільному рахунку" },
   { id: "positions", title: "Позиції",     hint: "по випусках, твоя дохідність проти ринку" },
   { id: "accounts",  title: "Рахунки",     hint: "брокери, залишки, крипта" },
   { id: "bonds",     title: "Облігації",   hint: "довідник випусків" },
@@ -52,7 +55,7 @@ const SECTIONS = [
   { id: "backup",    title: "Бекап",       hint: "експорт та відновлення" },
 ];
 
-export function DetailsScreen({ open, onOpen, onClose, market }) {
+export function DetailsScreen({ open, onOpen, onClose, market, pocket }) {
   if (open) {
     const section = SECTIONS.find(s => s.id === open);
     return (
@@ -61,12 +64,13 @@ export function DetailsScreen({ open, onOpen, onClose, market }) {
           <button className="back-btn" onClick={onClose} aria-label="Назад">‹</button>
           <h1 className="screen-title">{section?.title || ""}</h1>
         </header>
-        {open === "kids" && <KidsPanel market={market} />}
-        {open === "positions" && <PositionsPanel />}
+        {open === "kids" && <KidsPanel market={market} pocket={pocket} />}
+        {open === "pockets" && <PocketsPanel />}
+        {open === "positions" && <PositionsPanel pocket={pocket} />}
         {open === "accounts" && <AccountsPanel market={market} />}
         {open === "bonds" && <BondsManager />}
-        {open === "records" && <RecordsPanel />}
-        {open === "analytics" && <AnalyticsPanel />}
+        {open === "records" && <RecordsPanel pocket={pocket} />}
+        {open === "analytics" && <AnalyticsPanel pocket={pocket} />}
         {open === "backup" && <BackupPanel />}
       </div>
     );
@@ -100,7 +104,7 @@ const loadRate = () => {
   catch { return 15; }
 };
 
-function KidsPanel({ market }) {
+function KidsPanel({ market, pocket }) {
   const { list: persons, update } = usePersons();
   const { list: accounts } = useAccounts();
   const { list: lots } = useLots({});
@@ -111,20 +115,18 @@ function KidsPanel({ market }) {
 
   const bondsByIsin = new Map(bonds.map(b => [b.isin, b]));
 
-  const cryptoByAccount = new Map(accounts.filter(a => a.kind === "exchange").map(a => [
-    a.id,
-    Object.entries(a.holdings || {}).reduce((s, [t, amt]) => {
-      const p = coinPriceUAH(t, market);
-      return s + (p ? p * (Number(amt) || 0) : 0);
-    }, 0),
-  ]));
-  const cashByAccount = new Map();
-  for (const t of txs) {
-    const cur = t.currency || "UAH";
-    const prev = cashByAccount.get(t.accountId) || {};
-    prev[cur] = (prev[cur] || 0) + (Number(t.amount) || 0);
-    cashByAccount.set(t.accountId, prev);
-  }
+  const cryptoAccounts = accounts.filter(a => a.kind === "exchange");
+  const extraByPocket = extraByPocketFrom({
+    accounts: cryptoAccounts, txs,
+    valueByAccountId: new Map(cryptoAccounts.map(a => [
+      a.id,
+      Object.entries(a.holdings || {}).reduce((s, [t, amt]) => {
+        const p = coinPriceUAH(t, market);
+        return s + (p ? p * (Number(amt) || 0) : 0);
+      }, 0),
+    ])),
+  });
+  const cashByPocket = cashByPocketFrom(txs);
 
   const saveRate = (v) => {
     const n = Number(v);
@@ -132,7 +134,10 @@ function KidsPanel({ market }) {
     setRate(n);
     try { localStorage.setItem(RATE_KEY, String(n)); } catch { /* ignore */ }
   };
-  const kids = persons.filter(p => p.type === "child");
+  // У просторі «Я» дітей немає — показуємо учасників активної кишені.
+  const kids = pocket
+    ? persons.filter(p => pocketShare(pocket, p.id) > 0)
+    : persons.filter(p => p.type === "child");
 
   const patch = async (id, data) => {
     setErr(null);
@@ -140,7 +145,8 @@ function KidsPanel({ market }) {
     catch (e) { setErr(e.message); }
   };
 
-  const factMonthly = avgMonthlyDeposits({ transactions: txs, currency: "UAH", months: 6 });
+  const pocketTxs = pocket ? txs.filter(t => t.pocketId === pocket.id) : txs;
+  const factMonthly = avgMonthlyDeposits({ transactions: pocketTxs, currency: "UAH", months: 6 });
 
   return (
     <div className="panel">
@@ -163,8 +169,8 @@ function KidsPanel({ market }) {
         const age = p.birthDate ? ageInYears(p.birthDate) : null;
         const yearsLeft = age != null ? Math.max(0, 18 - age) : null;
         const goal = goalProgress({
-          person: p, accounts, lots, bondsByIsin,
-          cashByAccount, extraByAccount: cryptoByAccount, annualReturnPct: rate,
+          person: p, pockets: pocket ? [pocket] : [], lots, bondsByIsin,
+          cashByPocket, extraByPocket, annualReturnPct: rate,
         });
         return (
           <section key={p.id} className="kid-card">
@@ -300,11 +306,11 @@ function CryptoAccountCard({ account, market }) {
 // Аварійний вихід: тут можна виправити або видалити помилково введений лот
 // чи транзакцію. У щомісячному потоці сюди заходити не треба.
 
-function RecordsPanel() {
+function RecordsPanel({ pocket }) {
   return (
     <div className="panel">
-      <LotsManager accountFilter="all" />
-      <TransactionsPanel accountFilter="all" />
+      <LotsManager accountFilter="all" pocket={pocket} />
+      <TransactionsPanel accountFilter="all" pocket={pocket} />
     </div>
   );
 }
@@ -313,3 +319,86 @@ function RecordsPanel() {
 
 // Аналітика живе в окремому файлі — там історія цін, відновлення серії
 // й метрики просадок.
+
+/**
+ * Керування кишенями: хто в них і з якою вагою.
+ *
+ * Тут же — застереження про те, чим кишеня НЕ є. Юридично власність визначає
+ * запис на рахунку в депозитарії (ЗУ «Про депозитарну систему», ст. 8 ч. 1),
+ * а Сімейний кодекс ст. 173 ч. 2 прямо презюмує майно дітей, які живуть із
+ * батьками, власністю батьків. Тому застосунок ніде не пише «власність».
+ */
+function PocketsPanel() {
+  const { list: pockets, update } = usePockets();
+  const { list: persons } = usePersons();
+  const [err, setErr] = useState(null);
+
+  const patch = async (id, data) => {
+    setErr(null);
+    try { await update(id, data); }
+    catch (e) { setErr(e.message); }
+  };
+
+  const toggle = async (pocket, personId) => {
+    const w = { ...(pocket.memberWeights || {}) };
+    if (w[personId]) delete w[personId];
+    else w[personId] = 1;
+    await patch(pocket.id, { memberWeights: w });
+  };
+
+  return (
+    <div className="panel">
+      {err && <div className="portfolio-error">⚠ {err}</div>}
+
+      <p className="an-sub">
+        Кишеня — це облік, а не власність. Юридично все, що лежить на рахунку,
+        належить тому, на кого рахунок оформлено.
+      </p>
+
+      {pockets.map(pk => {
+        const weights = pk.memberWeights || {};
+        const total = Object.values(weights).reduce((s, w) => s + (Number(w) || 0), 0);
+        return (
+          <section key={pk.id} className="kid-card">
+            <label className="form-field">
+              <span className="form-label">Назва</span>
+              <LiveField value={pk.name} onSave={v => patch(pk.id, { name: v.trim() || pk.name })} />
+            </label>
+
+            <span className="form-label">Учасники</span>
+            {persons.map(p => {
+              const w = Number(weights[p.id]) || 0;
+              return (
+                <div key={p.id} className="pocket-member">
+                  <button
+                    className={`ghost-action ${w > 0 ? "on" : ""}`}
+                    onClick={() => toggle(pk, p.id)}>
+                    {w > 0 ? "✓" : "+"} {p.name}
+                  </button>
+                  {w > 0 && (
+                    <>
+                      <LiveField type="number" inputMode="decimal" value={w}
+                        onSave={v => {
+                          const n = Number(v);
+                          if (!Number.isFinite(n) || n <= 0) return;
+                          patch(pk.id, { memberWeights: { ...weights, [p.id]: n } });
+                        }} />
+                      <span className="an-sub">
+                        {total > 0 ? Math.round((w / total) * 100) + "%" : "—"}
+                      </span>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            {total === 0 && (
+              <p className="portfolio-error">
+                ⚠ Кишеня без учасників: усе, що в ній, рахуватиметься як нічиє.
+              </p>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
