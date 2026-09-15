@@ -147,10 +147,22 @@ function coinLedger(txs, exchangeIds, holdingsTotal, btc, fx) {
  * Щоденна серія вартості фонду.
  * Повертає [{ day, bonds, cash, crypto, total, contributed }].
  */
+/**
+ * Відновлює вартість портфеля по днях.
+ *
+ * Крок навмисно не параметризується: раніше довгі періоди будувались через
+ * день-два, і дохідність залежала від кроку більше, ніж від ринку — те саме
+ * портфоліо давало від −0,4% до +7,5% лише через частоту вибірки. Причина в
+ * тому, що метод умовного паю бере вартість «перед внеском» як total мінус
+ * сам внесок: на кроці в кілька днів у цю різницю потрапляє ще й рух ринку,
+ * і помилка накопичується через кількість паїв. Для графіка серію проріджує
+ * той, хто малює, — на підсумки це вже не впливає.
+ */
 export function buildSeries({
   lots = [], bondsByIsin = new Map(), transactions = [], accounts = [],
-  btc = {}, fx = {}, from, to = iso(Date.now()), stepDays = 1, pocketId = null,
+  btc = {}, fx = {}, from, to = iso(Date.now()), pocketId = null,
 }) {
+  const stepDays = 1;
   const exchangeIds = new Set(accounts.filter(a => a.kind === "exchange").map(a => a.id));
 
   // Монети мають власника прямо в даних, тож беремо частку кишені, а не
@@ -197,7 +209,11 @@ export function buildSeries({
       const d = String(tx.date).slice(0, 10);
       if (d > day) break;
       const amt = Number(tx.amount) || 0;
-      if (!exchangeIds.has(tx.accountId)) cash += amt;
+      // Гроші на біржі теж лежать у фонді, поки не перетворились на монети.
+      // Раніше біржові рахунки випадали з готівки цілком: у день поповнення
+      // вартість не росла, зате росла сума внесків — і метод паю приписував
+      // цю розбіжність збитку.
+      cash += amt;
       if (tx.kind === "deposit") contributed += amt;
     }
 

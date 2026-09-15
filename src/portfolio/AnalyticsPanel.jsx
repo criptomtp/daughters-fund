@@ -118,14 +118,19 @@ export function AnalyticsPanel({ pocket }) {
 
   const bondsByIsin = new Map(bonds.map(b => [b.isin, b]));
   const chosen = PERIODS.find(p => p.id === period);
+  // «Весь час» починається за день до першої операції, коли фонд ще порожній.
+  // Якщо стартувати в день першої операції, той внесок опиняється всередині
+  // стартової точки й випадає з «внесено за період»: у тебе так губились
+  // 10 282 ₴ найпершої покупки.
+  const zeroDay = iso(Date.parse(firstTx + "T00:00:00Z") - 86400000);
   const from = chosen.days
     ? iso(Date.parse(todayIso + "T00:00:00Z") - chosen.days * 86400000)
-    : firstTx;
-  const effFrom = from < firstTx ? firstTx : from;
+    : zeroDay;
+  const effFrom = from < zeroDay ? zeroDay : from;
 
   const rawPoints = buildSeries({
     lots, bondsByIsin, transactions: txs, accounts, pocketId: pocket?.id || null,
-    btc: prices.btc, fx: prices.fx, from: effFrom, stepDays: chosen.days && chosen.days <= 91 ? 1 : 3,
+    btc: prices.btc, fx: prices.fx, from: effFrom,
   });
   // Долар — це та сама серія, поділена на курс кожного дня. Так дохідність
   // лишається стійкою, на відміну від XIRR у доларах на короткій історії.
@@ -133,6 +138,19 @@ export function AnalyticsPanel({ pocket }) {
   const m = seriesMetrics(points);
   const months = monthlyBreakdown(points);
   const last = points[points.length - 1] || {};
+
+  // Для малювання беремо не більше ~180 точок: на екрані телефона більше
+  // все одно не видно, а SVG стає важким. Підсумки рахуються по ПОВНІЙ
+  // денній серії — саме залежність цифр від густоти вибірки й була помилкою.
+  const thinned = (() => {
+    const MAX = 180;
+    if (points.length <= MAX) return points;
+    const every = Math.ceil(points.length / MAX);
+    const out = points.filter((_, i) => i % every === 0);
+    const lastPoint = points[points.length - 1];
+    if (out[out.length - 1] !== lastPoint) out.push(lastPoint);
+    return out;
+  })();
   const ahead = futurePayments(coupons, lots, bondsByIsin, todayIso);
 
   // Податок видно лише на різниці брутто й нетто у виплатах — окремої
@@ -195,7 +213,7 @@ export function AnalyticsPanel({ pocket }) {
           з {effFrom} · внесено за період {money(m?.contributed)} ·{" "}
           <span className={m && m.gain >= 0 ? "up" : "down"}>{money(m?.gain)}</span>
         </div>
-        <Chart points={points} />
+        <Chart points={thinned} />
         <div className="an-legend">
           <span><i className="sw-brass" /> вартість</span>
           <span><i className="sw-dash" /> внесено</span>
