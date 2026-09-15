@@ -689,3 +689,12 @@
 .ghost-action.on { color: var(--brass); font-weight: 600; }
 
 .cal-pocket { color: var(--ink-mute); font-size: 12px; }
+
+/* Виплата, що надійшла раніше за розклад: підтвердити її можна так само,
+   але видно, що дата в застосунку — прогноз, а не факт. */
+.coupon-card.early { border: 1px dashed var(--line, rgba(0,0,0,.14)); }
+.coupon-early {
+  margin: 0 0 8px;
+  font-size: 12.5px; line-height: 1.45;
+  color: var(--ink-mute);
+}

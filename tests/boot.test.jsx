@@ -473,3 +473,56 @@ describe("рахунок належить кишеням, які ним кори
     })).rejects.toThrow("не доступний кишені");
   });
 });
+
+describe("виплата, що надійшла раніше за розклад", () => {
+  it("підтверджується справжньою датою й сумою", async () => {
+    const { accounts, brokers, persons, pockets, bonds, lots, coupons, transactions } =
+      await import("../src/portfolio/repository.js");
+    const { db } = await import("../src/portfolio/db.js");
+
+    const br = await brokers.add({ name: "ICU" + Math.random() });
+    const kid = await persons.add({ name: "K" + Math.random(), type: "child" });
+    const pk = await pockets.add({ name: "P" + Math.random(), memberWeights: { [kid.id]: 1 } });
+    const acc = await accounts.add({
+      name: "ICU" + Math.random(), brokerId: br.id, kind: "personal",
+      beneficiaryIds: [kid.id], pocketIds: [pk.id],
+    });
+    const isin = "UA500001" + String(Math.floor(Math.random() * 9000) + 1000);
+    await bonds.add({
+      isin, ticker: "УЛФ", type: "corporate", currency: "UAH", faceValue: 1000,
+      couponRate: 19, couponFrequency: 4,
+      issueDate: "2025-12-18", maturityDate: "2028-12-18",
+      customSchedule: [
+        { date: "2026-09-18", amountPerPiece: 47.5, kind: "coupon" },
+        { date: "2028-12-18", amountPerPiece: 1047.5, kind: "coupon+redemption" },
+      ],
+    });
+    await transactions.deposit({ accountId: acc.id, pocketId: pk.id, amount: 40000, currency: "UAH", date: "2026-01-02" });
+    const lot = await lots.add({
+      isin, accountId: acc.id, pocketId: pk.id, purchaseDate: "2026-04-06",
+      quantity: 31, purchasePrice: 1000, accruedInterestPerPiece: 0,
+    });
+
+    const ev = (await db.couponPayments.where("lotId").equals(lot.id).toArray())
+      .find(c => c.scheduledDate.slice(0, 10) === "2026-09-18");
+    expect(ev.status).toBe("scheduled");
+
+    // Емітент заплатив 15.09 і порахував за фактичними днями — менше,
+    // ніж чверть річного купона в розкладі.
+    await coupons.markGroupReceived([ev.id], {
+      actualDate: "2026-09-15", actualAmount: 1130.73, accountId: acc.id,
+    });
+
+    const after = await db.couponPayments.get(ev.id);
+    expect(after.status).toBe("received");
+    expect(after.actualDate.slice(0, 10)).toBe("2026-09-15");
+    expect(after.actualAmount).toBeCloseTo(1130.73, 2);
+
+    const cash = (await db.cashTransactions.where("accountId").equals(acc.id).toArray())
+      .filter(t => t.kind === "coupon_received");
+    expect(cash.length).toBe(1);
+    expect(cash[0].amount).toBeCloseTo(1130.73, 2);
+    expect(cash[0].pocketId).toBe(pk.id);
+    expect(cash[0].date.slice(0, 10)).toBe("2026-09-15");
+  });
+});

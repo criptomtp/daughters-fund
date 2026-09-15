@@ -323,6 +323,15 @@ function CouponForm({ onDone }) {
     return groupCouponEvents(coupons, lots).filter(e => e.status !== "received" && e.scheduledDate > t).slice(0, 3);
   }, [coupons, lots]);
 
+  // Розклад — це прогноз, а не факт. Емітент може заплатити на кілька днів
+  // раніше: УЛФ заплатив 15.09 за подію, поставлену на 18.09. Досі майбутню
+  // виплату можна було тільки побачити, тож записати реальні гроші не було
+  // чим. Тепер підтвердити можна будь-яку заплановану подію.
+  const rows = useMemo(() => [
+    ...pending.map(ev => ({ ev, early: false })),
+    ...upcoming.map(ev => ({ ev, early: true })),
+  ], [pending, upcoming]);
+
   // Останні підтверджені — щоб суму можна було виправити пізніше,
   // коли з'ясується, що надійшло не рівно стільки, скільки планувалось.
   const done = useMemo(
@@ -363,18 +372,14 @@ function CouponForm({ onDone }) {
     <>
       {err && <div className="portfolio-error">⚠ {err}</div>}
 
-      {pending.length === 0 && (
-        <div className="coupon-empty">
-          <p className="sheet-empty">Немає виплат, які чекають підтвердження.</p>
-          {upcoming.length > 0 && (
-            <ul className="upcoming-list">
-              {upcoming.map(ev => {
-                const { cur, text } = label(ev);
-                return <li key={ev.key}><span>{ev.scheduledDate}</span><span>{text}</span><strong>{money(ev.amountNet, cur)}</strong></li>;
-              })}
-            </ul>
-          )}
-        </div>
+      {rows.length === 0 && (
+        <p className="sheet-empty">Немає виплат, які чекають підтвердження.</p>
+      )}
+      {pending.length === 0 && upcoming.length > 0 && (
+        <p className="an-sub">
+          За розкладом ще нічого не настало. Якщо гроші вже прийшли — підтверди
+          найближчу виплату нижче й вкажи справжню дату.
+        </p>
       )}
 
       {done.length > 0 && (
@@ -395,11 +400,17 @@ function CouponForm({ onDone }) {
         </section>
       )}
 
-      {pending.map(ev => {
+      {rows.map(({ ev, early }) => {
         const { cur, text } = label(ev);
         const isEditing = editing?.key === ev.key;
         return (
-          <div key={ev.key} className="coupon-card">
+          <div key={ev.key} className={`coupon-card ${early ? "early" : ""}`}>
+            {early && (
+              <p className="coupon-early">
+                За розкладом {ev.scheduledDate}. Емітент часто платить раніше й
+                рахує за фактичними днями — постав справжню дату й суму з виписки.
+              </p>
+            )}
             <div className="coupon-head">
               <span className="coupon-date">{ev.scheduledDate}</span>
               <span className="coupon-kind">{ev.kind === "coupon" ? "купон" : ev.kind === "redemption" ? "погашення" : "купон + погашення"}</span>
@@ -438,7 +449,15 @@ function CouponForm({ onDone }) {
                   {busyKey === ev.key ? "…" : "Так, надійшов"}
                 </button>
                 <button className="ghost-action"
-                  onClick={() => setEditing({ key: ev.key, amount: Math.round(ev.amountNet * 100) / 100, date: ev.scheduledDate, accountId: ev.accountId })}>
+                  onClick={() => setEditing({
+                    key: ev.key,
+                    amount: Math.round(ev.amountNet * 100) / 100,
+                    // Для дострокової виплати дата за розкладом завідомо
+                    // неправильна — підставляємо сьогодні, це майже завжди
+                    // саме той день, коли гроші побачили на рахунку.
+                    date: early ? today() : ev.scheduledDate,
+                    accountId: ev.accountId,
+                  })}>
                   Змінити
                 </button>
               </div>
