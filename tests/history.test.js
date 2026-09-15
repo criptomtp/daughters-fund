@@ -83,3 +83,45 @@ describe("серія будується по днях незалежно від 
     expect(at("2026-01-10")).toBeCloseTo(5000, 6);
   });
 });
+
+describe("дохідність окремо по класах активів", () => {
+  const accounts = [{ id: "icu", kind: "personal" }, { id: "wb", kind: "exchange", holdingsByPocket: { p1: { BTC: 1 } } }];
+  const bondsByIsin = new Map([["X", { isin: "X", currency: "UAH", faceValue: 1000, couponRate: 0, couponFrequency: 1 }]]);
+
+  it("купон зараховується як дохід паперів, а не як їх падіння", () => {
+    // Купівля на 1000, потім купон 100 виходить у готівку. Вартість паперу
+    // не змінилась, тож сотня — це чистий дохід: +10%. Якби відплив не
+    // рухав паї, та сама сотня прочиталась би як −10% вартості паперів.
+    const pts = buildSeries({
+      lots: [{ id: "l1", isin: "X", accountId: "icu", pocketId: "p1", quantity: 1, purchasePrice: 1000, purchaseDate: "2026-01-02" }],
+      bondsByIsin, accounts, pocketId: "p1",
+      transactions: [
+        { id: "d", accountId: "icu", pocketId: "p1", date: "2026-01-01", kind: "deposit", amount: 1000, currency: "UAH" },
+        { id: "b", accountId: "icu", pocketId: "p1", date: "2026-01-02", kind: "lot_purchase", amount: -1000, currency: "UAH" },
+        { id: "c", accountId: "icu", pocketId: "p1", date: "2026-01-05", kind: "coupon_received", amount: 100, currency: "UAH" },
+      ],
+      from: "2026-01-01", to: "2026-01-08",
+    });
+    const m = seriesMetrics(pts, "bonds", "contributedBonds");
+    expect(m.twr).toBeCloseTo(0.10, 6);
+    // Гроші від купона з паперів вийшли, тому «вкладено в облігації» зменшилось.
+    expect(m.contributed).toBeCloseTo(900, 6);
+    expect(m.gain).toBeCloseTo(100, 6);
+  });
+
+  it("клас активів рахується окремо від решти портфеля", () => {
+    const pts = buildSeries({
+      lots: [{ id: "l1", isin: "X", accountId: "icu", pocketId: "p1", quantity: 1, purchasePrice: 1000, purchaseDate: "2026-01-02" }],
+      bondsByIsin, accounts, pocketId: "p1",
+      transactions: [
+        { id: "d", accountId: "icu", pocketId: "p1", date: "2026-01-01", kind: "deposit", amount: 1000, currency: "UAH" },
+        { id: "b", accountId: "icu", pocketId: "p1", date: "2026-01-02", kind: "lot_purchase", amount: -1000, currency: "UAH" },
+        { id: "d2", accountId: "wb", pocketId: "p1", date: "2026-01-03", kind: "deposit", amount: 500, currency: "UAH" },
+      ],
+      from: "2026-01-01", to: "2026-01-08",
+    });
+    const bonds = seriesMetrics(pts, "bonds", "contributedBonds");
+    expect(bonds.contributed).toBeCloseTo(1000, 6);   // поповнення біржі сюди не входить
+    expect(bonds.endValue).toBeCloseTo(1000, 6);
+  });
+});

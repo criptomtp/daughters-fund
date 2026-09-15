@@ -698,3 +698,24 @@
   font-size: 12.5px; line-height: 1.45;
   color: var(--ink-mute);
 }
+
+/* Дохідність по класах активів: облігації та крипта поводяться по-різному,
+   і в спільному числі це не видно. */
+.sleeve-table { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.sleeve-head,
+.sleeve-row {
+  display: grid;
+  grid-template-columns: minmax(64px, 1.1fr) repeat(4, minmax(56px, 1fr));
+  gap: 6px; align-items: baseline;
+}
+.sleeve-head {
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ink-mute); padding-bottom: 4px;
+}
+.sleeve-head span:not(:first-child),
+.sleeve-row span:not(:first-child) { text-align: right; }
+.sleeve-row { padding: 7px 0; border-top: 1px solid var(--line, rgba(0,0,0,.08)); font-size: 13px; }
+.sleeve-row .mono { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.sleeve-name { font-weight: 600; }
+.sleeve-row.total { font-weight: 700; }
+.sleeve-row.total .sleeve-name { color: var(--brass); }

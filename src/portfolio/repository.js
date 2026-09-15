@@ -345,13 +345,27 @@ export const bonds = {
         : null;
     }
 
-    // Regenerate coupon schedules для всіх лотів цього ISIN — в одній транзакції
+    // Перебудова розкладу для всіх лотів цього ISIN — в одній транзакції.
+    //
+    // Підтверджені виплати НЕ чіпаємо. Раніше тут стиралося все підряд: після
+    // виправлення дати погашення купони, які вже надійшли, поверталися в стан
+    // «очікується». Гроші при цьому лишалися в касі, бо касова операція живе
+    // окремо — і повторне підтвердження зарахувало б їх удруге. Саме та
+    // помилка, яка не падає, а тихо подвоює суму.
     const affectedLots = await db.lots.where("isin").equals(isin).toArray();
     await db.transaction("rw", [db.bondReferences, db.couponPayments], async () => {
       await db.bondReferences.put(updated);
       for (const lot of affectedLots) {
-        const schedule = generateCouponSchedule(updated, lot);
-        await db.couponPayments.where("lotId").equals(lot.id).delete();
+        const existingRows = await db.couponPayments.where("lotId").equals(lot.id).toArray();
+        const received = existingRows.filter(c => c.status === "received");
+        const keepDates = new Set(received.map(c => String(c.scheduledDate).slice(0, 10)));
+
+        for (const c of existingRows) {
+          if (c.status !== "received") await db.couponPayments.delete(c.id);
+        }
+
+        const schedule = generateCouponSchedule(updated, lot)
+          .filter(p => !keepDates.has(String(p.date).slice(0, 10)));
         if (schedule.length) {
           await db.couponPayments.bulkAdd(schedule.map(p => couponPaymentDoc(lot.id, p)));
         }

@@ -526,3 +526,67 @@ describe("виплата, що надійшла раніше за розклад
     expect(cash[0].date.slice(0, 10)).toBe("2026-09-15");
   });
 });
+
+describe("виправлення облігації не стирає історію", () => {
+  it("підтверджена виплата переживає зміну дати погашення", async () => {
+    const { accounts, brokers, persons, pockets, bonds, lots, coupons, transactions } =
+      await import("../src/portfolio/repository.js");
+    const { db } = await import("../src/portfolio/db.js");
+
+    const br = await brokers.add({ name: "ICU" + Math.random() });
+    const kid = await persons.add({ name: "K" + Math.random(), type: "child" });
+    const pk = await pockets.add({ name: "P" + Math.random(), memberWeights: { [kid.id]: 1 } });
+    const acc = await accounts.add({
+      name: "ICU" + Math.random(), brokerId: br.id, kind: "personal",
+      beneficiaryIds: [kid.id], pocketIds: [pk.id],
+    });
+    const isin = "UA500002" + String(Math.floor(Math.random() * 9000) + 1000);
+    await bonds.add({
+      isin, ticker: "УЛФ", type: "corporate", currency: "UAH", faceValue: 1000,
+      couponRate: 19, couponFrequency: 4,
+      issueDate: "2025-12-18", maturityDate: "2028-12-18",
+      customSchedule: [
+        { date: "2026-06-18", amountPerPiece: 47.5, kind: "coupon" },
+        { date: "2026-09-15", amountPerPiece: 47.5, kind: "coupon" },
+        { date: "2028-12-18", amountPerPiece: 1047.5, kind: "coupon+redemption" },
+      ],
+    });
+    await transactions.deposit({ accountId: acc.id, pocketId: pk.id, amount: 40000, currency: "UAH", date: "2026-01-02" });
+    const lot = await lots.add({
+      isin, accountId: acc.id, pocketId: pk.id, purchaseDate: "2026-04-06",
+      quantity: 31, purchasePrice: 1000, accruedInterestPerPiece: 0,
+    });
+
+    const paid = (await db.couponPayments.where("lotId").equals(lot.id).toArray())
+      .find(c => c.scheduledDate.slice(0, 10) === "2026-09-15");
+    await coupons.markGroupReceived([paid.id], {
+      actualDate: "2026-09-15", actualAmount: 1130.73, accountId: acc.id,
+    });
+    const cashBefore = (await transactions.balanceByCurrency(acc.id)).UAH;
+
+    // Зʼясувалось, що погашення насправді на 15 місяців раніше.
+    await bonds.update(isin, {
+      maturityDate: "2027-09-14", couponRate: 18.7,
+      customSchedule: [
+        { date: "2026-12-15", amountPerPiece: 46.62, kind: "coupon" },
+        { date: "2027-03-16", amountPerPiece: 46.62, kind: "coupon" },
+        { date: "2027-06-15", amountPerPiece: 46.62, kind: "coupon" },
+        { date: "2027-09-14", amountPerPiece: 1046.62, kind: "coupon+redemption" },
+      ],
+    });
+
+    const after = await db.couponPayments.where("lotId").equals(lot.id).toArray();
+    const stillReceived = after.filter(c => c.status === "received");
+    expect(stillReceived.length).toBe(1);
+    expect(stillReceived[0].actualAmount).toBeCloseTo(1130.73, 2);
+
+    // Каса не змінилась — виплату не зарахували вдруге й не відняли.
+    expect((await transactions.balanceByCurrency(acc.id)).UAH).toBeCloseTo(cashBefore, 2);
+
+    // Новий розклад став на місце старого, без дубля на вже оплачену дату.
+    const dates = after.map(c => c.scheduledDate.slice(0, 10)).sort();
+    expect(dates.filter(d => d === "2026-09-15").length).toBe(1);
+    expect(dates).toContain("2027-09-14");
+    expect(dates).not.toContain("2028-12-18");
+  });
+});

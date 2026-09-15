@@ -151,6 +151,19 @@ export function AnalyticsPanel({ pocket }) {
     if (out[out.length - 1] !== lastPoint) out.push(lastPoint);
     return out;
   })();
+  // Дохідність окремо по класах активів: облігації йдуть рівно й передбачувано,
+  // крипта — ні, і в загальному числі вони гасять одне одного до безликого
+  // середнього, з якого не зрозуміло, що саме працює.
+  const sleeves = (() => {
+    const out = [];
+    const bondsM = seriesMetrics(points, "bonds", "contributedBonds");
+    const cryptoM = seriesMetrics(points, "crypto", "contributedCrypto");
+    if (bondsM) out.push({ name: "Облігації", m: bondsM });
+    if (cryptoM) out.push({ name: "Крипта", m: cryptoM });
+    if (out.length > 1 && m) out.push({ name: "Разом", m, total: true });
+    return out;
+  })();
+
   const ahead = futurePayments(coupons, lots, bondsByIsin, todayIso);
 
   // Податок видно лише на різниці брутто й нетто у виплатах — окремої
@@ -230,6 +243,40 @@ export function AnalyticsPanel({ pocket }) {
           <span className="tile-value">{m?.annualized != null ? pct(m.annualized) : "—"}</span>
         </div>
       </section>
+
+      {sleeves.length > 1 && (
+        <section className="an-card">
+          <span className="strip-label">Звідки взялась дохідність</span>
+          <div className="sleeve-table">
+            <div className="sleeve-head">
+              <span />
+              <span>вкладено</span>
+              <span>зараз</span>
+              <span>приріст</span>
+              <span>дохідність</span>
+            </div>
+            {sleeves.map(sl => (
+              <div key={sl.name} className={`sleeve-row ${sl.total ? "total" : ""}`}>
+                <span className="sleeve-name">{sl.name}</span>
+                <span className="mono">{money(sl.m.contributed)}</span>
+                <span className="mono">{money(sl.m.endValue)}</span>
+                <span className={`mono ${sl.m.gain >= 0 ? "up" : "down"}`}>
+                  {sl.m.gain >= 0 ? "+" : ""}{money(sl.m.gain)}
+                </span>
+                <span className={`mono ${sl.m.twr >= 0 ? "up" : "down"}`}>
+                  {sl.m.annualized != null ? pct(sl.m.annualized) : pct(sl.m.twr)}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="an-sub">
+            Дохідність — це рух ціни за час, поки актив у тебе. Приріст у гривні
+            може бути іншим: якщо докуповувати, коли ціна впала, гривень
+            заробиш більше, ніж показує відсоток. Саме тому дві колонки
+            можуть дивитись у різні боки.
+          </p>
+        </section>
+      )}
 
       <section className="an-card">
         <span className="strip-label">Просадки</span>

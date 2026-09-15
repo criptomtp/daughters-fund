@@ -204,7 +204,7 @@ export function buildSeries({
       if (bond) bonds += lotCurrentValue(bond, lot, day);
     }
 
-    let cash = 0, contributed = 0;
+    let cash = 0, contributed = 0, intoBonds = 0, intoCrypto = 0;
     for (const tx of sortedTx) {
       const d = String(tx.date).slice(0, 10);
       if (d > day) break;
@@ -215,6 +215,14 @@ export function buildSeries({
       // цю розбіжність збитку.
       cash += amt;
       if (tx.kind === "deposit") contributed += amt;
+
+      // Скільки грошей зайшло в кожен клас активів окремо. Купон і погашення
+      // з нього виходять — інакше отримані гроші читались би як збиток
+      // облігацій, адже вартість паперу на них зменшується.
+      if (tx.kind === "lot_purchase") intoBonds += Math.abs(amt);
+      else if (tx.kind === "coupon_received" || tx.kind === "lot_redemption" || tx.kind === "lot_sale") {
+        intoBonds -= amt;
+      } else if (tx.kind === "crypto_buy") intoCrypto += Math.abs(amt);
     }
 
     // Монети на дату: остання купівля, що вже відбулась
@@ -224,7 +232,10 @@ export function buildSeries({
     const rate = interp(fx, day);
     const crypto = coins && price && rate ? coins * price * rate : 0;
 
-    points.push({ day, bonds, cash, crypto, total: bonds + cash + crypto, contributed });
+    points.push({
+      day, bonds, cash, crypto, total: bonds + cash + crypto,
+      contributed, contributedBonds: intoBonds, contributedCrypto: intoCrypto,
+    });
   }
   return points;
 }
@@ -237,29 +248,41 @@ export function buildSeries({
  * Пай додається на кожен внесок за ціною того дня — це стандартний спосіб
  * відокремити результат вкладень від руху грошей.
  */
-export function seriesMetrics(points) {
+/**
+ * @param points  денна серія з buildSeries
+ * @param valueKey    що вважати вартістю: "total", "bonds" чи "crypto"
+ * @param contribKey  що вважати внеском у цю частину портфеля
+ */
+export function seriesMetrics(points, valueKey = "total", contribKey = "contributed") {
   if (!points || points.length < 2) return null;
 
   // Вартість паю можна рахувати лише з моменту, коли в фонді щось з'явилось.
   // До того будь-яке ділення на кількість паїв безглузде.
-  const startIdx = points.findIndex(p => p.total > 0);
+  const val = (p) => Number(p[valueKey]) || 0;
+  const con = (p) => Number(p[contribKey]) || 0;
+
+  const startIdx = points.findIndex(p => val(p) > 0);
   if (startIdx === -1) return null;
   const live = points.slice(startIdx);
 
   let units = 1;
-  let nav = live[0].total;
-  let prevContrib = live[0].contributed;
+  let nav = val(live[0]);
+  let prevContrib = con(live[0]);
   const navSeries = [];
 
   for (const p of live) {
-    const inflow = p.contributed - prevContrib;
-    prevContrib = p.contributed;
-    const before = p.total - inflow;
-    if (inflow > 0 && units > 0 && before > 0) {
+    const inflow = con(p) - prevContrib;
+    prevContrib = con(p);
+    const before = val(p) - inflow;
+    // Відплив теж рухає паї: для окремого класу активів це звичайна річ —
+    // купон виходить з облігацій у готівку, і без цього кроку виплата
+    // виглядала б як падіння вартості паперів.
+    if (inflow !== 0 && units > 0 && before > 0) {
       const navBefore = before / units;
-      units += inflow / navBefore;
+      const nextUnits = units + inflow / navBefore;
+      if (nextUnits > 1e-9) units = nextUnits;
     }
-    nav = units > 0 ? p.total / units : nav;
+    nav = units > 0 ? val(p) / units : nav;
     navSeries.push({ day: p.day, nav });
   }
 
@@ -271,8 +294,8 @@ export function seriesMetrics(points) {
   }
 
   const first = points[0], last = points[points.length - 1];   // «внесено» — за весь обраний період
-  const contributedInPeriod = last.contributed - first.contributed;
-  const gain = last.total - first.total - contributedInPeriod;
+  const contributedInPeriod = con(last) - con(first);
+  const gain = val(last) - val(first) - contributedInPeriod;
   const twr = navSeries[0].nav > 0 ? (navSeries[navSeries.length - 1].nav / navSeries[0].nav - 1) : null;
   const years = (ts(last.day) - ts(first.day)) / (365.25 * DAY);
   const annualized = twr != null && years > 0.08 ? Math.pow(1 + twr, 1 / years) - 1 : null;
@@ -281,7 +304,7 @@ export function seriesMetrics(points) {
   const fromPeak = peak > 0 ? currentNav / peak - 1 : 0;
 
   return {
-    startValue: first.total, endValue: last.total,
+    startValue: val(first), endValue: val(last),
     contributed: contributedInPeriod, gain,
     twr, annualized,
     maxDrawdown: maxDD, drawdownFrom: ddFrom, drawdownTo: ddTo,
