@@ -86,6 +86,7 @@ function BuyForm({ onDone, market, pocketId }) {
   const [price, setPrice] = useState("");
   const [coin, setCoin] = useState("BTC");
   const [coinAmount, setCoinAmount] = useState("");
+  const [paidUsd, setPaidUsd] = useState("");
   const [qtyOverride, setQtyOverride] = useState(null);
   const [showContext, setShowContext] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -128,9 +129,23 @@ function BuyForm({ onDone, market, pocketId }) {
   const coins = Number(coinAmount) || 0;
   const coinPrice = isExchange ? coinPriceUAH(coin, market) : null;
 
+  // Скільки заплачено за монети — окремо від поповнення. Поповнення й купівля
+  // часто записуються різними днями: спершу завів долари, потім купив. Якщо
+  // поле порожнє, беремо суму поповнення з цього ж запису, а без нього —
+  // весь вільний залишок кишені на біржі.
+  const freeUah = isExchange ? cashNow + dep : 0;
+  const paidRaw = paidUsd === "" ? null : Math.max(0, Number(paidUsd) || 0);
+  const paidUah = !isExchange || coins <= 0 ? 0
+    : paidRaw == null
+      ? (dep > 0 ? dep : Math.max(0, cashNow))
+      : (fxRate > 0 && Math.abs(paidRaw * fxRate - freeUah) < fxRate * 0.01
+          ? freeUah                                  // «увесь залишок» — без копійок від курсу
+          : Math.round(paidRaw * fxRate * 100) / 100);
+  const overspend = isExchange && coins > 0 && paidUah > freeUah + 0.01;
+
   // Внесок без покупки — теж повноцінний запис. Саме цього не вміла стара форма.
   const canSubmit = !!account && !busy &&
-    (isExchange ? (dep > 0 || coins > 0) : (dep > 0 || qty > 0));
+    (isExchange ? ((dep > 0 || coins > 0) && !(coins > 0 && (paidUah <= 0 || overspend))) : (dep > 0 || qty > 0));
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -144,7 +159,7 @@ function BuyForm({ onDone, market, pocketId }) {
       }
       if (isExchange && coins > 0) {
         await txRepo.cryptoBuy({
-          accountId: effAccountId, pocketId, amount: dep, ticker: coin,
+          accountId: effAccountId, pocketId, amount: paidUah, ticker: coin,
           coinAmount: coins, currency: cur, date,
         });
       }
@@ -236,6 +251,24 @@ function BuyForm({ onDone, market, pocketId }) {
         </label>
       )}
 
+      {isExchange && coins > 0 && (
+        <label className="big-field">
+          <span className="big-label">Заплачено за монети, доларів</span>
+          <div className="big-input-row">
+            <span className="big-cur">$</span>
+            <input type="number" inputMode="decimal" step="0.01" min="0" className="big-input"
+              value={paidUsd}
+              placeholder={fxRate > 0 ? (paidUah / fxRate).toFixed(2) : ""}
+              onChange={e => setPaidUsd(e.target.value)} />
+          </div>
+          <span className={overspend ? "big-hint calc-warn" : "big-hint"}>
+            {overspend
+              ? `на біржі вільно лише ${money(freeUah, "UAH")} — стільки не заплатиш`
+              : `спишеться ${money(paidUah, "UAH")} · вільно на біржі ${money(freeUah, "UAH")}`}
+          </span>
+        </label>
+      )}
+
       {bond && (
         <label className="big-field">
           <span className="big-label">Ціна за штуку — як показує брокер</span>
@@ -260,7 +293,7 @@ function BuyForm({ onDone, market, pocketId }) {
               {coins > 0 && coinPrice && (
                 <div className="calc-sub">
                   за курсом сьогодні це {money(coinPrice * coins, "UAH")}
-                  {depRaw > 0 && <> · ціна входу ${Math.round(depRaw / coins).toLocaleString("uk-UA")} за {coin}</>}
+                  {paidUah > 0 && fxRate > 0 && <> · ціна входу ${Math.round(paidUah / fxRate / coins).toLocaleString("uk-UA")} за {coin}</>}
                 </div>
               )}
             </>

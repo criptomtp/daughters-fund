@@ -590,3 +590,41 @@ describe("виправлення облігації не стирає істор
     expect(dates).not.toContain("2028-12-18");
   });
 });
+
+describe("купівля крипти з уже наявного залишку", () => {
+  async function wallet() {
+    const { accounts, brokers, persons, pockets, transactions } = await import("../src/portfolio/repository.js");
+    const br = await brokers.add({ name: "WB" + Math.random() });
+    const p = await persons.add({ name: "P" + Math.random(), type: "parent" });
+    const pk = await pockets.add({ name: "Я" + Math.random(), memberWeights: { [p.id]: 1 } });
+    const acc = await accounts.add({ name: "WB" + Math.random(), brokerId: br.id, kind: "exchange", beneficiaryIds: [p.id], pocketIds: [pk.id] });
+    // Окремий запис: спершу лише поповнення на $125.
+    await transactions.deposit({ accountId: acc.id, pocketId: pk.id, amount: 5569, currency: "UAH", date: "2026-09-24" });
+    return { acc, pk, transactions };
+  }
+
+  it("монети без оплати не записуються — саме так і зʼявлялись безкоштовні", async () => {
+    const { acc, pk, transactions } = await wallet();
+    await expect(transactions.cryptoBuy({
+      accountId: acc.id, pocketId: pk.id, amount: 0, ticker: "BTC", coinAmount: 0.0016, currency: "UAH", date: "2026-09-25",
+    })).rejects.toThrow("скільки заплачено");
+  });
+
+  it("купівля із залишку списує гривню до нуля", async () => {
+    const { acc, pk, transactions } = await wallet();
+    await transactions.cryptoBuy({
+      accountId: acc.id, pocketId: pk.id, amount: 5569, ticker: "BTC", coinAmount: 0.0016, currency: "UAH", date: "2026-09-25",
+    });
+    expect((await transactions.balanceByCurrency(acc.id, null, pk.id)).UAH).toBeCloseTo(0, 2);
+  });
+
+  it("вдруге з тих самих грошей купити не вийде", async () => {
+    const { acc, pk, transactions } = await wallet();
+    await transactions.cryptoBuy({
+      accountId: acc.id, pocketId: pk.id, amount: 5569, ticker: "BTC", coinAmount: 0.0016, currency: "UAH", date: "2026-09-25",
+    });
+    await expect(transactions.cryptoBuy({
+      accountId: acc.id, pocketId: pk.id, amount: 5569, ticker: "BTC", coinAmount: 0.0016, currency: "UAH", date: "2026-09-25",
+    })).rejects.toThrow("не вистачає");
+  });
+});

@@ -491,6 +491,23 @@ export const transactions = {
     // Кишеня обов'язкова і тут: воронка одна для всіх операцій. Те, що крипта
     // повністю дитяча — рішення інтерфейсу, а не сховища.
     await requirePocket(pocketId);
+
+    // Монети не бувають безкоштовними. Раніше купівля з уже наявного залишку
+    // приходила сюди з сумою 0: монети додавались, гривня лишалась на місці,
+    // і з тих самих грошей можна було «купувати» без кінця.
+    if (coins > 0 && amt <= 0) {
+      throw new Error("Вкажи, скільки заплачено за монети");
+    }
+    if (amt > 0) {
+      const rows = await db.cashTransactions.where("accountId").equals(accountId).toArray();
+      const cur = currency || acc.primaryCurrency || "UAH";
+      const free = rows
+        .filter(r => r.pocketId === pocketId && (r.currency || "UAH") === cur)
+        .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+      if (amt > free + 0.01) {
+        throw new Error(`На біржі в цій кишені лише ${free.toFixed(2)} ₴ — на купівлю за ${amt.toFixed(2)} ₴ не вистачає`);
+      }
+    }
     await requireAccountInPocket(accountId, pocketId);
 
     await db.transaction("rw", [db.cashTransactions, db.accounts], async () => {
