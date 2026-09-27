@@ -5,7 +5,8 @@ import { useLots } from "./hooks/useLots.js";
 import { useCoupons } from "./hooks/useCoupons.js";
 import { useCashBalance } from "./hooks/useTransactions.js";
 import { accruedFromSchedule, groupCouponEvents, pocketCoins } from "./calculations.js";
-import { transactions as txRepo, lots as lotsRepo, coupons as couponsRepo } from "./repository.js";
+import { transactions as txRepo, lots as lotsRepo, coupons as couponsRepo, bonds as bondsRepo } from "./repository.js";
+import { lookupBond } from "./nbuRegistry.js";
 import { coinPriceUAH, COINS } from "./useMarket.js";
 
 // Лист запису — єдине місце, де щось вноситься руками.
@@ -70,6 +71,8 @@ export function RecordSheet({ open, onClose, initialTab = "buy", market, pocket,
 
 // ── Внесок і купівля ───────────────────────────────────────────────────────
 
+const NEW_BOND = "__new__";
+
 function BuyForm({ onDone, market, pocketId }) {
   const { list: allAccounts } = useAccounts();
   // Показуємо лише рахунки, якими цій кишені дозволено користуватися.
@@ -87,6 +90,8 @@ function BuyForm({ onDone, market, pocketId }) {
   const [coin, setCoin] = useState("BTC");
   const [coinAmount, setCoinAmount] = useState("");
   const [paidUsd, setPaidUsd] = useState("");
+  const [newIsin, setNewIsin] = useState("");
+  const [nbu, setNbu] = useState({ busy: false, msg: null, bad: false });
   const [qtyOverride, setQtyOverride] = useState(null);
   const [showContext, setShowContext] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -94,6 +99,30 @@ function BuyForm({ onDone, market, pocketId }) {
 
   const effAccountId = accountId || accounts[0]?.id || "";
   const effIsin = isin === null ? (bonds[0]?.isin || "") : isin;
+
+  // Новий папір додається прямо звідси: ISIN → реєстр НБУ → довідник. Раніше
+  // список пропонував лише те, що вже є в довіднику, і щойно куплену
+  // облігацію доводилось спершу заводити на іншому екрані.
+  const addFromNbu = async () => {
+    setNbu({ busy: true, msg: null, bad: false });
+    try {
+      const known = bonds.find(b => b.isin === newIsin);
+      if (known) { setIsin(known.isin); setNbu({ busy: false, msg: "Цей папір уже є в списку — вибрав його.", bad: false }); return; }
+      const found = await lookupBond(newIsin);
+      if (!found) {
+        setNbu({ busy: false, bad: true,
+          msg: `ISIN ${newIsin} у реєстрі НБУ немає. Реєстр веде лише ОВДП — корпоративний папір додай у «Деталі → Облігації» вручну.` });
+        return;
+      }
+      const ticker = found.ticker || `ОВДП-${found.maturityDate.slice(0, 7)}`;
+      await bondsRepo.add({ ...found, ticker });
+      setIsin(found.isin); setQtyOverride(null);
+      setNbu({ busy: false, bad: false,
+        msg: `Додано ${ticker}: купон ${found.couponRate}%, погашення ${found.maturityDate}.` });
+    } catch (e) {
+      setNbu({ busy: false, bad: true, msg: e.message || "Не вдалося звернутися до реєстру НБУ." });
+    }
+  };
   const account = accounts.find(a => a.id === effAccountId);
   // Біржовий рахунок ведеться інакше: облігацій там немає, є монети,
   // і заводяться туди долари, а не гривня.
@@ -171,7 +200,7 @@ function BuyForm({ onDone, market, pocketId }) {
           commission: 0, notes: "",
         });
       }
-      savePrefs({ accountId: effAccountId, isin: effIsin, deposit: depRaw });
+      savePrefs({ accountId: effAccountId, isin: effIsin === NEW_BOND ? null : effIsin, deposit: depRaw });
       onDone?.();
     } catch (e) {
       setErr(e.message || "Не вдалося записати");
@@ -206,11 +235,24 @@ function BuyForm({ onDone, market, pocketId }) {
           {!isExchange && (
             <label className="form-field">
               <span className="form-label">Облігація</span>
-              <select className="form-input" value={effIsin} onChange={e => { setIsin(e.target.value); setQtyOverride(null); }}>
+              <select className="form-input" value={effIsin} onChange={e => { setIsin(e.target.value); setQtyOverride(null); setNbu({ busy: false, msg: null, bad: false }); }}>
                 <option value="">— лише поповнення, без покупки —</option>
                 {bonds.map(b => <option key={b.isin} value={b.isin}>{b.isin} · {b.ticker || ""}</option>)}
+                <option value={NEW_BOND}>＋ інший папір — ввести ISIN</option>
               </select>
             </label>
+          )}
+          {!isExchange && effIsin === NEW_BOND && (
+            <div className="form-field">
+              <span className="form-label">ISIN нового паперу</span>
+              <input className="form-input" value={newIsin} maxLength={12} placeholder="UA4000..."
+                autoCapitalize="characters" onChange={e => setNewIsin(e.target.value.trim().toUpperCase())} />
+              <button type="button" className="ghost-action" disabled={newIsin.length !== 12 || nbu.busy}
+                onClick={addFromNbu}>
+                {nbu.busy ? "Тягну з НБУ…" : "↓ Додати з реєстру НБУ"}
+              </button>
+              {nbu.msg && <span className={nbu.bad ? "form-error" : "form-hint"}>{nbu.msg}</span>}
+            </div>
           )}
           <label className="form-field">
             <span className="form-label">Дата</span>
