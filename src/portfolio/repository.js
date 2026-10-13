@@ -398,6 +398,7 @@ export const CASH_KINDS = {
   // рахується з залишку на біржовому рахунку. Тому це не "зняття": у дохідність
   // як відтік власника не потрапляє.
   crypto_buy:      { label: "Купівля крипти",    sign: -1 },
+  crypto_swap:     { label: "Обмін монет",       sign: 0 },
   transfer_out:    { label: "Переказ (вихід)",   sign: -1 },
   transfer_in:     { label: "Переказ (вхід)",    sign: +1 },
   fee:             { label: "Комісія",           sign: -1 },
@@ -537,6 +538,51 @@ export const transactions = {
         byPocket[pocketId] = mine;
         await db.accounts.put({ ...fresh, holdingsByPocket: byPocket, holdingsAt: isoDate(date) || now() });
       }
+    });
+  },
+
+  /**
+   * Обмін однієї монети на іншу всередині кишені — наприклад, USDT на BTC.
+   *
+   * Гривня тут не рухається: вона вже витрачена, коли купували першу монету.
+   * Змінюється лише склад монет. Операцію все одно записуємо (з сумою 0),
+   * щоб в історії було видно, звідки взялися монети.
+   */
+  async cryptoSwap({ accountId, pocketId, fromTicker, fromAmount, toTicker, toAmount, date, notes }) {
+    const acc = await db.accounts.get(accountId);
+    if (!acc) throw new Error("Рахунок не знайдено");
+    if (acc.kind !== "exchange") throw new Error("Це не біржовий рахунок");
+    await requirePocket(pocketId);
+    const from = String(fromTicker || "").toUpperCase();
+    const to = String(toTicker || "").toUpperCase();
+    const give = Number(fromAmount) || 0;
+    const get = Number(toAmount) || 0;
+    if (!from || !to || from === to) throw new Error("Вибери дві різні монети");
+    if (give <= 0) throw new Error(`Вкажи, скільки ${from} віддано`);
+    if (get <= 0) throw new Error(`Вкажи, скільки ${to} отримано`);
+
+    await db.transaction("rw", [db.cashTransactions, db.accounts], async () => {
+      const fresh = await db.accounts.get(accountId);
+      const byPocket = { ...(fresh.holdingsByPocket || {}) };
+      const mine = { ...(byPocket[pocketId] || {}) };
+      const have = Number(mine[from]) || 0;
+      if (give > have + 1e-9) {
+        throw new Error(`У цій кишені лише ${have} ${from} — віддати ${give} не вийде`);
+      }
+      const r8 = (n) => Math.round(n * 1e8) / 1e8;
+      mine[from] = r8(have - give);
+      if (mine[from] <= 0) delete mine[from];
+      mine[to] = r8((Number(mine[to]) || 0) + get);
+      byPocket[pocketId] = mine;
+      await db.accounts.put({ ...fresh, holdingsByPocket: byPocket, holdingsAt: isoDate(date) || now() });
+
+      await db.cashTransactions.add({
+        id: uid(), accountId, pocketId, date: isoDate(date) || now(), currency: "UAH",
+        amount: 0, kind: "crypto_swap",
+        fromTicker: from, fromAmount: give, coinTicker: to, coinAmount: get,
+        refId: null, refType: null, counterTxId: null, counterAccountId: null,
+        notes: notes || `Обмін ${give} ${from} → ${get} ${to}`, createdAt: now(),
+      });
     });
   },
 

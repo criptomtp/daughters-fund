@@ -87,6 +87,7 @@ function BuyForm({ onDone, market, pocketId }) {
   const [date, setDate] = useState(today);
   const [deposit, setDeposit] = useState(prefs.deposit ?? 5000);
   const [exMode, setExMode] = useState(null);   // null = вибрати самому
+  const [payWith, setPayWith] = useState(null);  // null = вибрати самому; "UAH" або тікер монети
   const [price, setPrice] = useState("");
   const [coin, setCoin] = useState("BTC");
   const [coinAmount, setCoinAmount] = useState("");
@@ -133,7 +134,9 @@ function BuyForm({ onDone, market, pocketId }) {
   const cur = bond?.currency || account?.primaryCurrency || "UAH";
 
   const balances = useCashBalance(effAccountId, pocketId);
-  const cashNow = balances[cur] || 0;
+  // Округлюємо до копійки: сума плаваючих чисел дає «−0», яке на екрані
+  // читається як борг.
+  const cashNow = Math.round((balances[cur] || 0) * 100) / 100 || 0;
 
   // На біржу заходять долари. Внутрішній облік фонду ведеться в гривні, тому
   // одразу переводимо за поточним курсом НБУ — так само, як зроблено для
@@ -177,11 +180,27 @@ function BuyForm({ onDone, market, pocketId }) {
       : (fxRate > 0 && Math.abs(paidRaw * fxRate - freeUah) < fxRate * 0.01
           ? freeUah                                  // «увесь залишок» — без копійок від курсу
           : Math.round(paidRaw * fxRate * 100) / 100);
-  const overspend = isExchange && coins > 0 && paidUah > freeUah + 0.01;
+  // Чим платиш при обміні: гривнею з балансу біржі або монетою, яка вже лежить
+  // у кишені (найчастіше USDT, куплений при поповненні).
+  const heldCoins = isExchange ? pocketCoins(account, pocketId) : {};
+  const sourceCoins = Object.keys(heldCoins).filter(t => t !== coin && Number(heldCoins[t]) > 0);
+  const effPayWith = !swapMode ? "UAH"
+    : payWith && (payWith === "UAH" || sourceCoins.includes(payWith)) ? payWith
+    : (cashNow > 1 || sourceCoins.length === 0 ? "UAH" : sourceCoins[0]);
+  const payCoin = swapMode && effPayWith !== "UAH" ? effPayWith : null;
+  const payCoinHave = payCoin ? Number(heldCoins[payCoin]) || 0 : 0;
+  const payCoinGive = payCoin ? (paidUsd === "" ? payCoinHave : Math.max(0, Number(paidUsd) || 0)) : 0;
+  const payCoinOver = payCoin && payCoinGive > payCoinHave + 1e-9;
+
+  const overspend = isExchange && coins > 0 && !payCoin && paidUah > freeUah + 0.01;
 
   // Внесок без покупки — теж повноцінний запис. Саме цього не вміла стара форма.
   const canSubmit = !!account && !busy &&
-    (isExchange ? ((dep > 0 || coins > 0) && !(coins > 0 && (paidUah <= 0 || overspend))) : (dep > 0 || qty > 0));
+    (isExchange
+      ? (payCoin
+          ? coins > 0 && payCoinGive > 0 && !payCoinOver
+          : (dep > 0 || coins > 0) && !(coins > 0 && (paidUah <= 0 || overspend)))
+      : (dep > 0 || qty > 0));
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -193,7 +212,12 @@ function BuyForm({ onDone, market, pocketId }) {
           notes: isExchange ? `Поповнення біржі $${depRaw.toFixed(2)} (курс ${fxRate})` : "Внесок",
         });
       }
-      if (isExchange && coins > 0) {
+      if (payCoin) {
+        await txRepo.cryptoSwap({
+          accountId: effAccountId, pocketId, fromTicker: payCoin, fromAmount: payCoinGive,
+          toTicker: coin, toAmount: coins, date,
+        });
+      } else if (isExchange && coins > 0) {
         await txRepo.cryptoBuy({
           accountId: effAccountId, pocketId, amount: paidUah, ticker: coin,
           coinAmount: coins, currency: cur, date,
@@ -322,7 +346,38 @@ function BuyForm({ onDone, market, pocketId }) {
         </label>
       )}
 
-      {isExchange && coins > 0 && (
+      {swapMode && (sourceCoins.length > 0 || cashNow > 1) && (
+        <div className="form-field">
+          <span className="form-label">Чим платиш</span>
+          <div className="ph-pick pay-with">
+            {[...(cashNow > 1 ? ["UAH"] : []), ...sourceCoins].map(t => (
+              <button key={t} type="button"
+                className={`seg-btn ${effPayWith === t ? "active" : ""}`}
+                onClick={() => { setPayWith(t); setPaidUsd(""); }}>
+                {t === "UAH" ? `Гривня з балансу` : `${t} · є ${heldCoins[t]}`}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {payCoin && coins > 0 && (
+        <label className="big-field">
+          <span className="big-label">Віддано {payCoin}</span>
+          <div className="big-input-row">
+            <input type="number" inputMode="decimal" step="any" min="0" className="big-input"
+              value={paidUsd} placeholder={String(payCoinHave)}
+              onChange={e => setPaidUsd(e.target.value)} />
+          </div>
+          <span className={payCoinOver ? "big-hint calc-warn" : "big-hint"}>
+            {payCoinOver
+              ? `у кишені лише ${payCoinHave} ${payCoin}`
+              : `у кишені ${payCoinHave} ${payCoin} · після обміну лишиться ${Math.max(0, Math.round((payCoinHave - payCoinGive) * 1e8) / 1e8)}`}
+          </span>
+        </label>
+      )}
+
+      {isExchange && coins > 0 && !payCoin && (
         <label className="big-field">
           <span className="big-label">Заплачено за монети, доларів</span>
           <div className="big-input-row">
@@ -357,14 +412,18 @@ function BuyForm({ onDone, market, pocketId }) {
           coins > 0 || dep > 0 ? (
             <>
               <div className="calc-line">
-                на біржу заходить <strong>${depRaw.toFixed(2)}</strong> ({money(dep, "UAH")})
+                {swapMode
+                  ? (payCoin ? <>віддаєш <strong>{payCoinGive} {payCoin}</strong></> : <>з балансу спишеться <strong>{money(paidUah, "UAH")}</strong></>)
+                  : <>на біржу заходить <strong>${depRaw.toFixed(2)}</strong> ({money(dep, "UAH")})</>}
                 {coins > 0 && <> · залишок стане{" "}
                   <strong>{(Number(pocketCoins(account, pocketId)[coin] || 0) + coins).toFixed(8)} {coin}</strong></>}
               </div>
               {coins > 0 && coinPrice && (
                 <div className="calc-sub">
                   за курсом сьогодні це {money(coinPrice * coins, "UAH")}
-                  {paidUah > 0 && fxRate > 0 && <> · ціна входу ${Math.round(paidUah / fxRate / coins).toLocaleString("uk-UA")} за {coin}</>}
+                  {payCoin
+                    ? <> · ціна входу {Math.round(payCoinGive / coins).toLocaleString("uk-UA")} {payCoin} за {coin}</>
+                    : paidUah > 0 && fxRate > 0 && <> · ціна входу ${Math.round(paidUah / fxRate / coins).toLocaleString("uk-UA")} за {coin}</>}
                 </div>
               )}
             </>

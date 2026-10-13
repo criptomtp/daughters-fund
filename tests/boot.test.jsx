@@ -628,3 +628,29 @@ describe("купівля крипти з уже наявного залишку"
     })).rejects.toThrow("не вистачає");
   });
 });
+
+describe("обмін монети на монету", () => {
+  it("USDT, куплений при поповненні, обмінюється на BTC без руху гривні", async () => {
+    const { accounts, brokers, persons, pockets, transactions } = await import("../src/portfolio/repository.js");
+    const br = await brokers.add({ name: "WB" + Math.random() });
+    const p = await persons.add({ name: "P" + Math.random(), type: "child" });
+    const pk = await pockets.add({ name: "K" + Math.random(), memberWeights: { [p.id]: 1 } });
+    const acc = await accounts.add({ name: "WB" + Math.random(), brokerId: br.id, kind: "exchange", beneficiaryIds: [p.id], pocketIds: [pk.id] });
+
+    // Поповнення $125 одразу пішло на 125 USDT
+    await transactions.deposit({ accountId: acc.id, pocketId: pk.id, amount: 5600, currency: "UAH", date: "2026-10-13" });
+    await transactions.cryptoBuy({ accountId: acc.id, pocketId: pk.id, amount: 5600, ticker: "USDT", coinAmount: 125, currency: "UAH", date: "2026-10-13" });
+    const cashBefore = (await transactions.balanceByCurrency(acc.id, null, pk.id)).UAH;
+
+    await transactions.cryptoSwap({ accountId: acc.id, pocketId: pk.id, fromTicker: "USDT", fromAmount: 125, toTicker: "BTC", toAmount: 0.0014, date: "2026-10-13" });
+
+    const after = await accounts.get(acc.id);
+    expect(after.holdingsByPocket[pk.id].BTC).toBeCloseTo(0.0014, 8);
+    expect(after.holdingsByPocket[pk.id].USDT).toBeUndefined();
+    expect((await transactions.balanceByCurrency(acc.id, null, pk.id)).UAH).toBeCloseTo(cashBefore, 2);
+
+    // вдруге тих самих USDT уже немає
+    await expect(transactions.cryptoSwap({ accountId: acc.id, pocketId: pk.id, fromTicker: "USDT", fromAmount: 125, toTicker: "BTC", toAmount: 0.0014, date: "2026-10-13" }))
+      .rejects.toThrow("лише");
+  });
+});
