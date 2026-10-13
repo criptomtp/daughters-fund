@@ -86,6 +86,7 @@ function BuyForm({ onDone, market, pocketId }) {
   const [isin, setIsin] = useState(prefs.isin ?? null);
   const [date, setDate] = useState(today);
   const [deposit, setDeposit] = useState(prefs.deposit ?? 5000);
+  const [exMode, setExMode] = useState(null);   // null = вибрати самому
   const [price, setPrice] = useState("");
   const [coin, setCoin] = useState("BTC");
   const [coinAmount, setCoinAmount] = useState("");
@@ -137,7 +138,13 @@ function BuyForm({ onDone, market, pocketId }) {
   // На біржу заходять долари. Внутрішній облік фонду ведеться в гривні, тому
   // одразу переводимо за поточним курсом НБУ — так само, як зроблено для
   // історичних поповнень (кожне записане в гривні за курсом своєї дати).
-  const depRaw = Math.max(0, Number(deposit) || 0);
+  // На біржі дві різні дії: завести гроші й обміняти вже заведені на монети.
+  // Коли вони жили в одній формі, поле поповнення підставляло минулу суму —
+  // і «купити за ті $125, що вже лежать» означало або поповнити вдруге, або
+  // здогадатись стерти поле. Тепер дія вибирається явно, а за замовчуванням —
+  // обмін, якщо на біржі є вільні гроші.
+  const swapMode = isExchange && (exMode ?? (cashNow > 1 ? "swap" : "deposit")) === "swap";
+  const depRaw = swapMode ? 0 : Math.max(0, Number(deposit) || 0);
   const fxRate = Number(market?.uahPerUSD) || 0;
   const dep = isExchangeInput ? Math.round(depRaw * fxRate * 100) / 100 : depRaw;
   const dirty = Number(price) || 0;
@@ -261,6 +268,27 @@ function BuyForm({ onDone, market, pocketId }) {
         </div>
       )}
 
+      {isExchange && (
+        <div className="seg ex-mode" role="tablist">
+          {[["deposit", "Поповнити біржу"], ["swap", "Обміняти на монети"]].map(([id, label]) => (
+            <button key={id} type="button" role="tab" aria-selected={(swapMode ? "swap" : "deposit") === id}
+              className={`seg-btn ${(swapMode ? "swap" : "deposit") === id ? "active" : ""}`}
+              onClick={() => { setExMode(id); setPaidUsd(""); }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {swapMode && (
+        <p className="an-sub">
+          Вільно на біржі: <strong>{money(cashNow, "UAH")}</strong>
+          {fxRate > 0 && <> ≈ ${(cashNow / fxRate).toFixed(2)}</>}. Вкажи, скільки монет
+          отримав і скільки за них віддав — гривня спишеться з цього залишку.
+        </p>
+      )}
+
+      {!swapMode && (
       <label className="big-field">
         <span className="big-label">{isExchange ? "Поповнення біржі, доларів" : "Поповнення"}</span>
         <div className="big-input-row">
@@ -276,6 +304,7 @@ function BuyForm({ onDone, market, pocketId }) {
             : `на рахунку вже ${money(cashNow, cur)}`}
         </span>
       </label>
+      )}
 
       {isExchange && (
         <label className="big-field">

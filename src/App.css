@@ -719,3 +719,5 @@
 .sleeve-name { font-weight: 600; }
 .sleeve-row.total { font-weight: 700; }
 .sleeve-row.total .sleeve-name { color: var(--brass); }
+
+.seg.ex-mode { grid-template-columns: 1fr 1fr; }
