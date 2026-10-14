@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "./db.js";
 import { useBonds } from "./hooks/useBonds.js";
@@ -9,6 +10,7 @@ import {
 } from "./calculations.js";
 import { CASH_KINDS } from "./repository.js";
 import { coinPriceUAH } from "./useMarket.js";
+import { fetchPriceHistory, estimateCoinBuys, fxOn } from "./history.js";
 
 // Розгорнута картка рахунку: що на ньому лежить, коли й за скільки куплено,
 // що надійде далі і всі рухи грошей. У списку рахунків видно лише підсумок —
@@ -20,6 +22,8 @@ const day = (d) => String(d || "").slice(0, 10);
 const ua = (d) => { const s = day(d); return s ? `${s.slice(8, 10)}.${s.slice(5, 7)}.${s.slice(0, 4)}` : "—"; };
 const signed = (n) => (n >= 0 ? "+" : "−") + money(Math.abs(n));
 
+const lotIds0 = (lots) => new Set(lots.map(l => l.id));
+
 export function AccountDetail({ accountId, market, onBack }) {
   const account = useLiveQuery(() => db.accounts.get(accountId), [accountId]);
   const lots = useLiveQuery(() => db.lots.where("accountId").equals(accountId).toArray(), [accountId], []);
@@ -28,6 +32,17 @@ export function AccountDetail({ accountId, market, onBack }) {
   const { list: brokers } = useBrokers();
   const { list: pockets } = usePockets();
   const { list: coupons } = useCoupons({});
+
+  // Історія ціни біткоїна — лише для біржі: з неї відновлюється ціна входу
+  // старих купівель, записаних без кількості монет.
+  const [prices, setPrices] = useState(null);
+  const isExchangeAcc = account?.kind === "exchange";
+  useEffect(() => {
+    if (!isExchangeAcc) return undefined;
+    let alive = true;
+    fetchPriceHistory("2026-01-01").then(p => { if (alive) setPrices(p); }).catch(() => {});
+    return () => { alive = false; };
+  }, [isExchangeAcc]);
 
   if (!account) return <p className="sheet-empty">Завантаження…</p>;
 
@@ -49,10 +64,21 @@ export function AccountDetail({ accountId, market, onBack }) {
   const open = lots.filter(l => !l.closedAt || day(l.closedAt) > today);
   const closed = lots.filter(l => l.closedAt && day(l.closedAt) <= today);
 
+  // Купони, які вже прийшли по кожному лоту. Без них «зараз мінус вкладено»
+  // показує збиток там, де його немає: частину вкладеного (НКД при покупці)
+  // емітент уже повернув купоном, а сам купон пішов на нові папери.
+  const receivedByLot = new Map();
+  for (const c of coupons) {
+    if (!lotIds0(lots).has(c.lotId) || c.status !== "received") continue;
+    const amt = Number(c.actualAmount ?? c.amountNet) || 0;
+    receivedByLot.set(c.lotId, (receivedByLot.get(c.lotId) || 0) + amt);
+  }
+
   const byIsin = new Map();
   for (const l of open) {
     const b = bondsByIsin.get(l.isin);
-    const g = byIsin.get(l.isin) || { isin: l.isin, bond: b, lots: [], qty: 0, invested: 0, value: 0 };
+    const g = byIsin.get(l.isin) || { isin: l.isin, bond: b, lots: [], qty: 0, invested: 0, value: 0, received: 0 };
+    g.received += receivedByLot.get(l.id) || 0;
     g.lots.push(l);
     g.qty += l.quantity;
     g.invested += lotInvested(l);
@@ -63,6 +89,16 @@ export function AccountDetail({ accountId, market, onBack }) {
     String(a.bond?.maturityDate).localeCompare(String(b.bond?.maturityDate)));
   const bondsValue = positions.reduce((s, p) => s + p.value, 0);
   const bondsInvested = positions.reduce((s, p) => s + p.invested, 0);
+
+  // Звідки взялися гроші на рахунку. Своїми вважаємо лише ті, що прийшли
+  // ззовні: поповнення й перекази з інших рахунків. Купон — це дохід, і
+  // папір, куплений за купон, — реінвестиція, а не новий внесок.
+  const sumKind = (kinds) => txs.filter(t => kinds.includes(t.kind)).reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const ownIn = sumKind(["deposit", "withdrawal"]);
+  const transfersIn = sumKind(["transfer_in", "transfer_out", "pocket_in", "pocket_out"]);
+  const couponsIn = sumKind(["coupon_received", "lot_redemption", "lot_sale"]);
+  const otherIn = sumKind(["manual", "fee"]);
+  const revaluation = bondsValue - bondsInvested;
 
   const lotIds = new Set(lots.map(l => l.id));
   const upcoming = groupCouponEvents(coupons.filter(c => lotIds.has(c.lotId)), lots)
@@ -77,6 +113,10 @@ export function AccountDetail({ accountId, market, onBack }) {
   const cryptoOps = txs
     .filter(t => t.kind === "crypto_buy" || t.kind === "crypto_swap")
     .sort((a, b) => day(b.date).localeCompare(day(a.date)));
+  const btcEst = isCrypto && prices
+    ? estimateCoinBuys({ txs, coinsTotal: Number(coinsTotal.BTC) || 0, ticker: "BTC", btc: prices.btc, fx: prices.fx })
+    : new Map();
+  const usdRate = Number(market?.uahPerUSD) || 0;
 
   const total = (isCrypto ? cryptoValue : bondsValue) + cash;
 
@@ -100,12 +140,32 @@ export function AccountDetail({ accountId, market, onBack }) {
             </>
           ) : (
             <>
-              <div><span>Облігації зараз</span><strong>{money0(bondsValue)}</strong></div>
-              <div><span>Вкладено в них</span><strong>{money0(bondsInvested)}</strong></div>
+              <div><span>Твої гроші, заведені на рахунок</span><strong>{money0(ownIn)}</strong></div>
+              {Math.abs(transfersIn) > 0.005 && (
+                <div><span>Перекази з інших рахунків</span><strong>{signed(transfersIn)}</strong></div>
+              )}
+              <div><span>Отримано купонів і погашень</span><strong className="up">{signed(couponsIn)}</strong></div>
+              <div><span>Переоцінка паперів</span>
+                <strong className={revaluation >= 0 ? "up" : "down"}>{signed(revaluation)}</strong></div>
+              <div className="ad-result"><span>Заробив на цьому рахунку</span>
+                <strong className={total - ownIn - transfersIn >= 0 ? "up" : "down"}>
+                  {signed(total - ownIn - transfersIn)}
+                  {ownIn + transfersIn > 0 && ` · ${(((total - ownIn - transfersIn) / (ownIn + transfersIn)) * 100).toFixed(1)}%`}
+                </strong></div>
             </>
           )}
           <div><span>Вільні гроші на рахунку</span><strong>{money(Math.round(cash * 100) / 100 || 0)}</strong></div>
         </div>
+        {!isCrypto && (
+          <p className="an-sub">
+            Облігації зараз коштують {money0(bondsValue)}, на них витрачено {money0(bondsInvested)} —
+            але частину цих грошей дали купони, а не ти. Тому результат рахується від твоїх
+            внесків: купони — це дохід, папір, куплений за купон, — реінвестиція.
+            «Переоцінка» — різниця між ціною покупки й нинішньою вартістю; вона мала й тане до
+            погашення, бо НКД, доплачений при покупці, повертається купоном.
+            {Math.abs(otherIn) > 0.005 && ` Корекції: ${signed(otherIn)}.`}
+          </p>
+        )}
         {account.legalOwnerNote && <p className="an-sub">Оформлено: {account.legalOwnerNote}</p>}
       </section>
 
@@ -120,7 +180,9 @@ export function AccountDetail({ accountId, market, onBack }) {
               </div>
               <div className="ad-pos-meta">
                 {p.isin} · {p.qty} шт · купон {p.bond?.couponRate ?? "—"}% · погашення {ua(p.bond?.maturityDate)}
-                {" · "}<span className={p.value - p.invested >= 0 ? "up" : "down"}>{signed(p.value - p.invested)}</span>
+                {p.received > 0 && <> · купонів отримано {money0(p.received)}</>}
+                {" · результат "}<span className={p.value - p.invested + p.received >= 0 ? "up" : "down"}>
+                  {signed(p.value - p.invested + p.received)}</span>
               </div>
               <div className="ad-lots">
                 <div className="ad-lot ad-lot-head">
@@ -203,16 +265,25 @@ export function AccountDetail({ accountId, market, onBack }) {
               <span>дата</span><span>отримано</span><span>віддано</span><span>ціна входу</span>
             </div>
             {cryptoOps.map(t => {
-              const coins = Number(t.coinAmount) || 0;
               const swap = t.kind === "crypto_swap";
+              const est = btcEst.get(t.id);
+              const coins = Number(t.coinAmount) || est?.coins || 0;
+              const ticker = t.coinTicker || (est ? "BTC" : "");
+              const approx = !t.coinAmount && !!est?.estimated;
               const paid = swap ? `${t.fromAmount} ${t.fromTicker}` : money0(Math.abs(t.amount));
+              // Ціна входу в доларах — так її показує біржа й так її звично порівнювати.
+              const entryUah = !swap && coins ? Math.abs(t.amount) / coins : null;
+              // Курс беремо на дату купівлі, а не сьогоднішній: інакше гривня, що
+              // подешевшала за пів року, робить старі покупки дешевшими, ніж були.
+              const rate = (prices && fxOn(prices.fx, t.date)) || usdRate;
               const entry = !coins ? "—"
                 : swap ? `${Math.round(t.fromAmount / coins).toLocaleString("uk-UA")} ${t.fromTicker}`
-                : money0(Math.abs(t.amount) / coins);
+                : rate > 0 ? `${approx ? "≈ " : ""}$${Math.round(entryUah / rate).toLocaleString("uk-UA")}`
+                : money0(entryUah);
               return (
                 <div key={t.id} className="ad-lot ad-crypto">
                   <span>{ua(t.date)}{pocketTag(t.pocketId)}</span>
-                  <span>{coins ? `${coins} ${t.coinTicker || ""}` : (t.notes || "—")}</span>
+                  <span>{coins ? `${approx ? "≈ " : ""}${coins.toFixed(6)} ${ticker}` : (t.notes || "—")}</span>
                   <span>{paid}</span>
                   <span>{entry}</span>
                 </div>
@@ -220,7 +291,9 @@ export function AccountDetail({ accountId, market, onBack }) {
             })}
           </div>
           <p className="an-sub">
-            Старі купівлі, імпортовані з виписки, записані без кількості монет — у них видно лише суму.
+            Позначені «≈» — купівлі, імпортовані з виписки без кількості монет. Їх відновлено з ціни
+            біткоїна того дня й підігнано так, щоб разом вийшов твій реальний залишок на біржі.
+            Ціна входу в доларах — за курсом НБУ на дату купівлі.
           </p>
         </section>
       )}

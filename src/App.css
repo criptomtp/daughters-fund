@@ -748,3 +748,4 @@
 }
 .ad-op span { display: flex; flex-direction: column; }
 .ad-note { font-size: 11.5px; color: var(--ink-mute); }
+.ad-result { border-top: 1px solid var(--line, rgba(0,0,0,.1)); padding-top: 6px; font-weight: 700; }

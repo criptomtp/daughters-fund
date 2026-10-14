@@ -125,3 +125,25 @@ describe("дохідність окремо по класах активів", (
     expect(bonds.endValue).toBeCloseTo(1000, 6);
   });
 });
+
+describe("ціна входу для старих купівель без кількості монет", () => {
+  it("відновлюється з ціни дня й сходиться з реальним залишком", async () => {
+    const { estimateCoinBuys } = await import("../src/portfolio/history.js");
+    const btc = { "2026-02-01": 80000, "2026-06-01": 60000 };
+    const fx = { "2026-01-01": 40, "2026-12-01": 40 };
+    const est = estimateCoinBuys({
+      ticker: "BTC", btc, fx, coinsTotal: 0.0035,
+      txs: [
+        { id: "a", kind: "crypto_buy", date: "2026-02-01", amount: -3200 },            // ≈0.001
+        { id: "b", kind: "crypto_buy", date: "2026-06-01", amount: -2400 },            // ≈0.001
+        { id: "c", kind: "crypto_buy", date: "2026-09-01", amount: -5000, coinTicker: "BTC", coinAmount: 0.0015 },
+        { id: "u", kind: "crypto_buy", date: "2026-09-02", amount: -5000, coinTicker: "USDT", coinAmount: 125 },
+      ],
+    });
+    expect(est.get("c")).toEqual({ coins: 0.0015, estimated: false });
+    expect(est.has("u")).toBe(false);                  // USDT — не біткоїн
+    expect(est.get("a").estimated).toBe(true);
+    const sum = est.get("a").coins + est.get("b").coins + est.get("c").coins;
+    expect(sum).toBeCloseTo(0.0035, 9);               // разом — рівно залишок на біржі
+  });
+});

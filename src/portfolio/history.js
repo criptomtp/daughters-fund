@@ -381,3 +381,47 @@ export function futurePayments(coupons, lots, bondsByIsin, asOfDate) {
   }
   return { couponsAhead, redemptionsAhead };
 }
+
+/**
+ * Скільки монет дала кожна купівля — для ціни входу.
+ *
+ * Купівлі, імпортовані з виписки біржі, записані лише сумою в гривні, без
+ * кількості монет. Відновлюємо її з ринкової ціни дня (CoinGecko × курс НБУ),
+ * а потім масштабуємо так, щоб разом із точно записаними купівлями вийшов
+ * реальний залишок на біржі. Це оцінка, і повертаємо її з позначкою — у
+ * базу як факт вона не пишеться.
+ */
+export function estimateCoinBuys({ txs = [], coinsTotal = 0, ticker = "BTC", btc = {}, fx = {} }) {
+  const out = new Map();
+  let recorded = 0;
+  const guesses = [];
+  for (const t of txs) {
+    if (t.kind === "crypto_swap" && String(t.coinTicker).toUpperCase() === ticker) {
+      recorded += Number(t.coinAmount) || 0;
+      continue;
+    }
+    if (t.kind !== "crypto_buy") continue;
+    const tk = t.coinTicker ? String(t.coinTicker).toUpperCase() : ticker;
+    if (tk !== ticker) continue;
+    // Частина старих записів має кількість лише в примітці («Куплено 0.001567 BTC») —
+    // це факт з біржі, а не оцінка, тож беремо його звідти.
+    const fromNote = /([\d.]+)\s*BTC/i.exec(String(t.notes || ""));
+    const coins = Number(t.coinAmount) || (fromNote ? Number(fromNote[1]) : 0) || 0;
+    if (coins > 0) { out.set(t.id, { coins, estimated: false }); recorded += coins; continue; }
+    const d = String(t.date).slice(0, 10);
+    const price = lookup(btc, d);
+    const rate = interp(fx, d);
+    const guess = price && rate ? Math.abs(Number(t.amount) || 0) / (price * rate) : 0;
+    if (guess > 0) guesses.push({ id: t.id, guess });
+  }
+  const guessed = guesses.reduce((s, g) => s + g.guess, 0);
+  const left = coinsTotal - recorded;
+  const scale = guessed > 0 && left > 0 ? left / guessed : 1;
+  for (const g of guesses) out.set(g.id, { coins: g.guess * scale, estimated: true });
+  return out;
+}
+
+/** Курс гривні до долара на дату — інтерпольований між опорними точками НБУ. */
+export function fxOn(fx, day) {
+  return interp(fx || {}, String(day).slice(0, 10));
+}
