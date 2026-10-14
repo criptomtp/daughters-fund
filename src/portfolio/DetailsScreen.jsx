@@ -18,6 +18,7 @@ import { CouponCalendar } from "./CouponCalendar.jsx";
 import { MaturityLadder } from "./MaturityLadder.jsx";
 import { AnalyticsPanel } from "./AnalyticsPanel.jsx";
 import { PositionsPanel } from "./PositionsPanel.jsx";
+import { AccountDetail } from "./AccountDetail.jsx";
 import { usePockets } from "./hooks/usePockets.js";
 
 const money = (n) => (n == null || !isFinite(n) ? "—" : "₴" + Math.round(n).toLocaleString("uk-UA"));
@@ -231,11 +232,15 @@ function KidsPanel({ market, pocket }) {
 function AccountsPanel({ market, pocket }) {
   const { list: accounts } = useAccounts();
   const exchanges = accounts.filter(a => a.kind === "exchange");
+  const [openId, setOpenId] = useState(null);
 
+  if (openId) {
+    return <AccountDetail accountId={openId} market={market} onBack={() => setOpenId(null)} />;
+  }
   return (
     <div className="panel">
       {exchanges.map(a => <CryptoAccountCard key={a.id} account={a} market={market} pocket={pocket} />)}
-      <AccountsManager />
+      <AccountsManager onOpen={setOpenId} />
     </div>
   );
 }

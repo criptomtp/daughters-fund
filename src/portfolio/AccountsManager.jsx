@@ -19,7 +19,7 @@ function fmtMoney(n, cur = "UAH") {
 
 const KIND_LABEL = { personal: "Персональний", shared: "Спільний" };
 
-export function AccountsManager() {
+export function AccountsManager({ onOpen } = {}) {
   const { list: accounts, loading, error, add, update, remove } = useAccounts();
   const { list: persons } = usePersons();
   const { list: pockets } = usePockets();
@@ -131,11 +131,15 @@ export function AccountsManager() {
               const balanceCurrencies = Object.keys(balances);
               return (
                 <div key={acc.id} className="account-card" style={{ "--owner-color": acc.color }}>
-                  <div className="account-card-main">
+                  <div className={`account-card-main ${onOpen ? "clickable" : ""}`}
+                    role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
+                    onClick={onOpen ? () => onOpen(acc.id) : undefined}
+                    onKeyDown={onOpen ? (e => { if (e.key === "Enter") onOpen(acc.id); }) : undefined}>
                     <div className="account-card-top">
                       <span className="account-emoji">{acc.emoji}</span>
                       <span className="account-name">{acc.name}</span>
                       <span className={`account-kind ${acc.kind}`}>{KIND_LABEL[acc.kind]}</span>
+                      {onOpen && <span className="account-open">›</span>}
                     </div>
                     <div className="account-card-meta">
                       <span className="account-beneficiaries">

@@ -654,3 +654,32 @@ describe("обмін монети на монету", () => {
       .rejects.toThrow("лише");
   });
 });
+
+describe("картка рахунку", () => {
+  it("показує облігації рахунку з датою, кількістю й ціною покупки", async () => {
+    const { accounts, brokers, persons, pockets, bonds, lots, transactions } = await import("../src/portfolio/repository.js");
+    const { AccountDetail } = await import("../src/portfolio/AccountDetail.jsx");
+    const br = await brokers.add({ name: "ICU" + Math.random() });
+    const p = await persons.add({ name: "P" + Math.random(), type: "child" });
+    const pk = await pockets.add({ name: "K" + Math.random(), memberWeights: { [p.id]: 1 } });
+    const acc = await accounts.add({ name: "ICU-картка", brokerId: br.id, kind: "personal", beneficiaryIds: [p.id], pocketIds: [pk.id] });
+    const isin = "UA400009" + String(Math.floor(Math.random() * 9000) + 1000);
+    await bonds.add({ isin, ticker: "ОВДП-ТЕСТ", type: "ovdp", currency: "UAH", faceValue: 1000, couponRate: 17, couponFrequency: 2,
+      issueDate: "2026-01-01", maturityDate: "2030-02-20" });
+    await transactions.deposit({ accountId: acc.id, pocketId: pk.id, amount: 6000, currency: "UAH", date: "2026-10-01" });
+    await lots.add({ isin, accountId: acc.id, pocketId: pk.id, purchaseDate: "2026-10-13", quantity: 5, purchasePrice: 1003.4, accruedInterestPerPiece: 22 });
+
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const root = createRoot(el);
+    await act(async () => { root.render(<AccountDetail accountId={acc.id} market={{ uahPerUSD: 44 }} onBack={() => {}} />); });
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    const text = el.textContent;
+    expect(text).toContain("ОВДП-ТЕСТ");
+    expect(text).toContain("13.10.2026");
+    expect(text).toContain("1003.40");
+    expect(text).toContain("Поповнення");
+    await act(async () => { root.unmount(); });
+  });
+});

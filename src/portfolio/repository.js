@@ -386,8 +386,8 @@ export const bonds = {
 // ── Cash Transactions ──────────────────────────────────────────────────────
 
 export const CASH_KINDS = {
-  pocket_out: "Передано іншій кишені",
-  pocket_in:  "Отримано від іншої кишені",
+  pocket_out:      { label: "Передано іншій кишені",     sign: -1 },
+  pocket_in:       { label: "Отримано від іншої кишені", sign: +1 },
   deposit:         { label: "Поповнення",        sign: +1 },
   withdrawal:      { label: "Зняття",            sign: -1 },
   lot_purchase:    { label: "Купівля облігації", sign: -1 },
